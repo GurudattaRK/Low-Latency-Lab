@@ -58,9 +58,10 @@ PICOPERF_SRC := ../../PicoPerf/picoperf.c
 PICOPERF_INC := ../../PicoPerf
 
 # Build flags.
-OPT_FLAGS  := -O3
+OPT_FLAGS  := -Ofast
 WARN_FLAGS := -Wall -Wextra
 LTO_FLAGS  := -flto
+EXTRA_FLAGS := -funroll-loops -fomit-frame-pointer -fno-semantic-interposition
 
 # -march=native works on most targets but can fail on some RISC-V toolchains.
 ifeq ($(ARCH),riscv64)
@@ -69,7 +70,7 @@ else
     ARCH_FLAGS := -march=native
 endif
 
-CFLAGS := $(OPT_FLAGS) $(ARCH_FLAGS) $(LTO_FLAGS) $(WARN_FLAGS) \
+CFLAGS := $(OPT_FLAGS) $(ARCH_FLAGS) $(LTO_FLAGS) $(EXTRA_FLAGS) $(WARN_FLAGS) \
           -DUSE_PICOPERF=$(USE_PICOPERF)
 
 # Source files depend on whether PicoPerf is used.
@@ -128,10 +129,11 @@ endif
 
 # Remove generated binaries, PGO profiles, and leftover data files.
 clean:
-	$(RM) $(TARGET) $(TARGET)_gen
+	$(RM) $(TARGET) $(TARGET)_gen $(TARGET)_profile
 	$(RM) *.gcda *.gcno
 	$(RM) -r pgo_profiles
 	$(RM) test.locked unlocked_test.data
+	$(RM) slow_profile
 
 # Show what platform/arch the build will target.
 info:
