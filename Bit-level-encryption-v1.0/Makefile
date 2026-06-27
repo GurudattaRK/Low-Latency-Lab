@@ -1,32 +1,130 @@
-# Compiler and flags
-CC := gcc
-PICOPERF := /home/strange/Documents/GitHub/PicoPerf/picoperf.c
-PICOPERF_INC := /home/strange/Documents/GitHub/PicoPerf
-CFLAGS := -Ofast -march=native -flto
-PGOFLAGS := -fprofile-generate
-USEFLAGS := -fprofile-use
+# ─────────────────────────────────────────────────────────────────────────────
+#  Cross-platform Makefile — GCC and Clang only
+#  Targets: Linux (x86/x64, arm64, RISC-V), macOS (x86, Apple Silicon),Windows via MSYS2/MinGW with clang or gcc
+# ─────────────────────────────────────────────────────────────────────────────
+
+SRC    := main.c
 TARGET := main
 
-# Default target: full PGO cycle (aggressive compiler + link + PGO optimizations)
-.PHONY: all baseline pgo clean
+# ── Detect OS ─────────────────────────────────────────────────────────────────
+UNAME := $(shell uname -s)
+RM    := rm -f
 
-all: pgo
+ifeq ($(UNAME),Darwin)
+    PLATFORM := macos
+else ifneq ($(findstring MINGW,$(UNAME)),)
+    PLATFORM := windows
+else ifneq ($(findstring MSYS,$(UNAME)),)
+    PLATFORM := windows
+else
+    PLATFORM := linux
+endif
 
-$(TARGET): main.c
-	$(CC) $(CFLAGS) -o $(TARGET) main.c $(PICOPERF) -I$(PICOPERF_INC)
+# ── Detect arch ───────────────────────────────────────────────────────────────
+ARCH := $(shell uname -m)
+ifeq ($(ARCH),arm64)
+    ARCH := aarch64
+endif
 
-# Aggressive compiler + link optimizations without PGO
-baseline: $(TARGET)
+# ── Compiler selection ────────────────────────────────────────────────────────
+# Default: clang on macOS (Xcode), gcc everywhere else.
+# Override: make CC=clang
+ifeq ($(PLATFORM),macos)
+    CC ?= clang
+else
+    CC ?= gcc
+endif
 
-# Full PGO cycle: generate profile, train with enc+dec, then build final binary
+CC_IS_CLANG := $(shell $(CC) --version 2>&1 | grep -c clang)
+
+# ── picoperf: x86/x64 Linux only ─────────────────────────────────────────────
+USE_PICOPERF := 0
+ifeq ($(PLATFORM),linux)
+    ifneq ($(filter $(ARCH),x86_64 i686 i386),)
+        USE_PICOPERF := 1
+    endif
+endif
+
+PICOPERF_SRC := ../../PicoPerf/picoperf.c
+PICOPERF_INC := ../../PicoPerf
+
+# ── Compile flags ─────────────────────────────────────────────────────────────
+OPT_FLAGS  := -O3
+WARN_FLAGS := -Wall -Wextra
+LTO_FLAGS  := -flto
+
+# -march=native: supported on all GCC/Clang targets except some RISC-V toolchains
+ifeq ($(ARCH),riscv64)
+    ARCH_FLAGS :=
+else
+    ARCH_FLAGS := -march=native
+endif
+
+CFLAGS := $(OPT_FLAGS) $(ARCH_FLAGS) $(LTO_FLAGS) $(WARN_FLAGS)
+
+# ── Source list ───────────────────────────────────────────────────────────────
+ifeq ($(USE_PICOPERF),1)
+    ALL_SRC   := $(SRC) $(PICOPERF_SRC)
+    INC_FLAGS := -I$(PICOPERF_INC)
+else
+    ALL_SRC   := $(SRC)
+    INC_FLAGS :=
+endif
+
+# ── PGO flags ─────────────────────────────────────────────────────────────────
+ifeq ($(CC_IS_CLANG),1)
+    PGO_DIR      := pgo_profiles
+    PGO_GEN      := -fprofile-instr-generate=$(PGO_DIR)/profile.clangraw
+    PGO_USE      := -fprofile-instr-use=$(PGO_DIR)/profile.clangprofdata
+else
+    PGO_GEN      := -fprofile-generate
+    PGO_USE      := -fprofile-use -fprofile-correction
+endif
+
+# ── Targets ───────────────────────────────────────────────────────────────────
+.PHONY: all pgo clean info
+
+all: baseline
+
+baseline:
+	$(CC) $(CFLAGS) $(INC_FLAGS) -o $(TARGET) $(ALL_SRC)
+
+# ── PGO ───────────────────────────────────────────────────────────────────────
+ifeq ($(CC_IS_CLANG),1)
+
 pgo:
-	$(CC) $(CFLAGS) $(PGOFLAGS) -o $(TARGET)_pgo_gen main.c $(PICOPERF) -I$(PICOPERF_INC)
-	printf '1\n' | ./$(TARGET)_pgo_gen >/dev/null 2>&1
-	printf '2\n' | ./$(TARGET)_pgo_gen >/dev/null 2>&1
-	mv $(TARGET)_pgo_gen-main.gcda $(TARGET)-main.gcda
-	mv $(TARGET)_pgo_gen-picoperf.gcda $(TARGET)-picoperf.gcda
-	$(CC) $(CFLAGS) $(USEFLAGS) -o $(TARGET) main.c $(PICOPERF) -I$(PICOPERF_INC)
-	rm -f $(TARGET)_pgo_gen $(TARGET)-main.gcda $(TARGET)-picoperf.gcda
+	@mkdir -p $(PGO_DIR)
+	$(CC) $(CFLAGS) $(PGO_GEN) $(INC_FLAGS) -o $(TARGET)_gen $(ALL_SRC)
+	printf '1\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
+	printf '2\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
+	llvm-profdata merge -output=$(PGO_DIR)/profile.clangprofdata $(PGO_DIR)/profile.clangraw
+	$(CC) $(CFLAGS) $(PGO_USE) $(INC_FLAGS) -o $(TARGET) $(ALL_SRC)
+	$(RM) $(TARGET)_gen
 
+else
+
+pgo:
+	$(CC) $(CFLAGS) $(PGO_GEN) $(INC_FLAGS) -o $(TARGET)_gen $(ALL_SRC)
+	printf '1\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
+	printf '2\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
+	$(CC) $(CFLAGS) $(PGO_USE) $(INC_FLAGS) -o $(TARGET) $(ALL_SRC)
+	$(RM) $(TARGET)_gen
+
+endif
+
+# ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
-	rm -f $(TARGET) $(TARGET)_pgo_gen $(TARGET)-main.gcda $(TARGET)-picoperf.gcda $(TARGET)_pgo_gen-main.gcda $(TARGET)_pgo_gen-picoperf.gcda main.gcda picoperf.gcda *.gcno test.locked unlocked_test.data
+	$(RM) $(TARGET) $(TARGET)_gen
+	$(RM) *.gcda *.gcno
+	$(RM) -r pgo_profiles
+	$(RM) test.locked unlocked_test.data
+
+# ── Info ──────────────────────────────────────────────────────────────────────
+info:
+	@echo "PLATFORM    : $(PLATFORM)"
+	@echo "ARCH        : $(ARCH)"
+	@echo "CC          : $(CC)"
+	@echo "CC_IS_CLANG : $(CC_IS_CLANG)"
+	@echo "USE_PICOPERF: $(USE_PICOPERF)"
+	@echo "CFLAGS      : $(CFLAGS)"
+	@echo "ALL_SRC     : $(ALL_SRC)"
