@@ -4,6 +4,24 @@
 #include <stdint.h>
 #include <stdalign.h>
 
+/* Compiler-specific loop unroll hints. The loop counts are fixed at compile time. */
+#if defined(__GNUC__) && !defined(__clang__)
+    #define UNROLL_4  _Pragma("GCC unroll 4")
+    #define UNROLL_8  _Pragma("GCC unroll 8")
+    #define UNROLL_16 _Pragma("GCC unroll 16")
+    #define UNROLL_32 _Pragma("GCC unroll 32")
+#elif defined(__clang__)
+    #define UNROLL_4  _Pragma("unroll 4")
+    #define UNROLL_8  _Pragma("unroll 8")
+    #define UNROLL_16 _Pragma("unroll 16")
+    #define UNROLL_32 _Pragma("unroll 32")
+#else
+    #define UNROLL_4
+    #define UNROLL_8
+    #define UNROLL_16
+    #define UNROLL_32
+#endif
+
 #if defined(__APPLE__) && defined(__aarch64__)
     /* Apple Silicon uses 128-byte cache lines; most other CPUs use 64 bytes. */
     #define MATRIX_ALIGN 128
@@ -162,6 +180,7 @@ static uint32_t scalar_xor_key[2][8][2];
  */
 static void precompute_key_tables(const uint32_t *key_matrix)
 {
+    UNROLL_8
     for (int round = 0; round < 8; round++)
     {
         /* Encryption uses key words 0..31 in forward order. */
@@ -181,6 +200,7 @@ static void precompute_key_tables(const uint32_t *key_matrix)
         scalar_xor_key[1][round][0] = (uint32_t)kd_xor0;
         scalar_xor_key[1][round][1] = (uint32_t)kd_xor1;
 
+        UNROLL_32
         for (int i = 0; i < 32; i++)
         {
             int amt;
@@ -203,6 +223,7 @@ static void precompute_key_tables(const uint32_t *key_matrix)
         }
 
 #if HAVE_AVX2
+        UNROLL_4
         for (int ymm = 0; ymm < 4; ymm++)
         {
             int base = ymm * 8;
@@ -267,6 +288,7 @@ FORCE_INLINE void encrypt_block_avx2(uint32_t *state,
     __m256i r2 = _mm256_loadu_si256((__m256i *)&state[16]);
     __m256i r3 = _mm256_loadu_si256((__m256i *)&state[24]);
 
+    UNROLL_8
     for (int round = 0; round < 8; round++)
     {
         r0 = rotate_avx2_phase0(r0, amounts[round][0][0]);
@@ -302,6 +324,7 @@ FORCE_INLINE void decrypt_block_avx2(uint32_t *state,
     __m256i r2 = _mm256_loadu_si256((__m256i *)&state[16]);
     __m256i r3 = _mm256_loadu_si256((__m256i *)&state[24]);
 
+    UNROLL_8
     for (int round = 0; round < 8; round++)
     {
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
@@ -344,6 +367,7 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     __m256i b2 = _mm256_loadu_si256((__m256i *)&b[16]);
     __m256i b3 = _mm256_loadu_si256((__m256i *)&b[24]);
 
+    UNROLL_8
     for (int round = 0; round < 8; round++)
     {
         a0 = rotate_avx2_phase0(a0, amounts[round][0][0]);
@@ -407,6 +431,7 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     __m256i b2 = _mm256_loadu_si256((__m256i *)&b[16]);
     __m256i b3 = _mm256_loadu_si256((__m256i *)&b[24]);
 
+    UNROLL_8
     for (int round = 0; round < 8; round++)
     {
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
@@ -457,13 +482,9 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
 
 int main()
 {
-    /*
-     * Hardcoded to '2' (decrypt) so the benchmark runs without interaction.
-     * The original interactive prompts are kept below as comments for reference.
-     */
-    char ch = '2';
-    /* printf("what do you want to do?\n1.Encrypt a file\n2.Decrypt a file\nenter your option's number:"); */
-    /* scanf("%s", &ch); */
+    char ch;
+    printf("what do you want to do?\n1.Encrypt a file\n2.Decrypt a file\nenter your option's number:");
+    scanf("%s", &ch);
 
     _Alignas(MATRIX_ALIGN) uint32_t key_matrix[32];
 
@@ -544,8 +565,10 @@ int main()
 #if HAVE_AVX2
                 encrypt_block_avx2(state, avx2_rot_amount[0], avx2_xor_vec[0]);
 #else
+                UNROLL_8
                 for (int round = 0; round < 8; round++)
                 {
+                    UNROLL_16
                     for (int index = 0; index < 32; index += 2)
                     {
                         state[index]   = rotate_left (state[index],   scalar_rot_amount[0][round][0][index]);
@@ -554,6 +577,7 @@ int main()
                     state[31] ^= scalar_xor_key[0][round][0];
                     transpose_matrix(state);
 
+                    UNROLL_16
                     for (int index = 0; index < 32; index += 2)
                     {
                         state[index]   = rotate_right(state[index],   scalar_rot_amount[0][round][1][index]);
@@ -650,10 +674,12 @@ int main()
 #if HAVE_AVX2
                 decrypt_block_avx2(state, avx2_rot_amount[1], avx2_xor_vec[1]);
 #else
+                UNROLL_8
                 for (int round = 0; round < 8; round++)
                 {
                     transpose_matrix(state);
                     state[31] ^= scalar_xor_key[1][round][0];
+                    UNROLL_16
                     for (int index = 0; index < 32; index += 2)
                     {
                         state[index]   = rotate_left (state[index],   scalar_rot_amount[1][round][0][index]);
@@ -662,6 +688,7 @@ int main()
 
                     transpose_matrix(state);
                     state[31] ^= scalar_xor_key[1][round][1];
+                    UNROLL_16
                     for (int index = 0; index < 32; index += 2)
                     {
                         state[index]   = rotate_right(state[index],   scalar_rot_amount[1][round][1][index]);

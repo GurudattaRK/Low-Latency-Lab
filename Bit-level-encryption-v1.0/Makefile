@@ -35,13 +35,9 @@ ifeq ($(ARCH),arm64)
     ARCH := aarch64
 endif
 
-# Choose the compiler.  macOS defaults to Clang, everything else to GCC.
-# You can override: make CC=clang
-ifeq ($(PLATFORM),macos)
-    CC ?= clang
-else
-    CC ?= gcc
-endif
+# Choose the compiler.  Clang is now the default.
+# You can override: make CC=gcc
+CC ?= clang
 
 CC_IS_CLANG := $(shell $(CC) --version 2>&1 | grep -c clang)
 
