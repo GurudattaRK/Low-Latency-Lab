@@ -2,8 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <semaphore.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -14,9 +12,13 @@
 #include "platform.h"
 #include "crypto_core.h"
 #include "aio_wrapper.h"
+#include "barrier.h"
 
-#define USE_PICOPERF 0
+#if USE_PICOPERF
+#include "picoperf.h"
+#else
 #include "perf_timer.h"
+#endif
 
 #define EXIT_SUCCESS           0
 #define EXIT_INVALID_ARGS      1
@@ -37,15 +39,8 @@ typedef struct {
     int core_id;
     OperationMode mode;
     const struct KeyTables* key_tables;
-    
-    #if defined(__linux__)
-    sem_t wake_sem;
-    sem_t done_sem;
-    #elif defined(__APPLE__)
-    sem_t* wake_sem;
-    sem_t* done_sem;
-    #endif
-    
+    portable_barrier_t* ready_barrier;
+    portable_barrier_t* done_barrier;
     volatile int shutdown;
 } WorkerTask;
 
@@ -54,13 +49,10 @@ void worker_process(WorkerTask* task) {
     pin_to_core(task->core_id);
     
     while (1) {
-        #if defined(__linux__)
-        sem_wait(&task->wake_sem);
-        #elif defined(__APPLE__)
-        sem_wait(task->wake_sem);
-        #endif
+        portable_barrier_wait(task->ready_barrier);
         
         if (task->shutdown) {
+            portable_barrier_wait(task->done_barrier);
             break;
         }
         
@@ -68,16 +60,14 @@ void worker_process(WorkerTask* task) {
             process_region(task->buffer, task->region_size, task->mode, task->key_tables);
         }
         
-        #if defined(__linux__)
-        sem_post(&task->done_sem);
-        #elif defined(__APPLE__)
-        sem_post(task->done_sem);
-        #endif
+        portable_barrier_wait(task->done_barrier);
     }
 }
 
-static void dispatch_work(WorkerTask* tasks, int num_workers, uint8_t* buffer, 
-                         size_t chunk_size, OperationMode mode, const struct KeyTables* key_tables) {
+static void dispatch_work(portable_barrier_t* ready_barrier,
+                          portable_barrier_t* done_barrier,
+                          WorkerTask* tasks, int num_workers, uint8_t* buffer,
+                          size_t chunk_size, OperationMode mode, const struct KeyTables* key_tables) {
     if (chunk_size == 0) return;
     
     // Split on 128-byte block boundaries so no worker ever starts mid-block
@@ -97,15 +87,11 @@ static void dispatch_work(WorkerTask* tasks, int num_workers, uint8_t* buffer,
         tasks[i].region_size = sz;
         tasks[i].mode = mode;
         tasks[i].key_tables = key_tables;
-        
-        #if defined(__linux__)
-        sem_post(&tasks[i].wake_sem);
-        #elif defined(__APPLE__)
-        sem_post(tasks[i].wake_sem);
-        #endif
-        
         offset += sz;
     }
+    
+    // Release all workers at once; barrier wait also provides a full memory fence
+    portable_barrier_wait(ready_barrier);
     
     // Parent processes the remaining complete blocks (the trailing
     // chunk_size % 128 tail bytes are intentionally left untouched).
@@ -114,14 +100,8 @@ static void dispatch_work(WorkerTask* tasks, int num_workers, uint8_t* buffer,
         process_region(buffer + offset, parent_blocks * BLOCK_SIZE, mode, key_tables);
     }
     
-    // Wait for all workers
-    for (int i = 0; i < num_workers; i++) {
-        #if defined(__linux__)
-        sem_wait(&tasks[i].done_sem);
-        #elif defined(__APPLE__)
-        sem_wait(tasks[i].done_sem);
-        #endif
-    }
+    // Wait for all workers to finish their chunks
+    portable_barrier_wait(done_barrier);
 }
 
 int main(int argc, char** argv) {
@@ -197,6 +177,11 @@ int main(int argc, char** argv) {
     
     precompute_key_tables(key_matrix, key_tables);
     printf("Key tables precomputed\n\n");
+
+#if USE_PICOPERF
+    picoperf_setup(0);
+    pin_to_cpu(0);
+#endif
     
     // Open files (PARENT ONLY)
     printf("Opening files...\n");
@@ -206,6 +191,9 @@ int main(int argc, char** argv) {
         munmap(key_tables, sizeof(struct KeyTables));
         return EXIT_FILE_NOT_FOUND;
     }
+    #if defined(__linux__)
+    posix_fadvise(fd_in, 0, 0, POSIX_FADV_SEQUENTIAL);
+    #endif
     
     struct stat st;
     if (fstat(fd_in, &st) != 0) {
@@ -225,6 +213,9 @@ int main(int argc, char** argv) {
         munmap(key_tables, sizeof(struct KeyTables));
         return EXIT_FILE_NOT_FOUND;
     }
+    #if defined(__linux__)
+    posix_fadvise(fd_out, 0, 0, POSIX_FADV_SEQUENTIAL);
+    #endif
     
     // Allocate three SHARED buffers with huge page hint
     printf("Allocating %d SHARED buffers (%zu MB each)...\n", NUM_BUFFERS, buffer_size / (1024 * 1024));
@@ -257,8 +248,12 @@ int main(int argc, char** argv) {
                PARALLEL_THRESHOLD / (1024 * 1024));
         
         // Single-core processing
+#if USE_PICOPERF
+        start_measuring();
+#else
         struct timespec timer;
         start_measuring(&timer);
+#endif
         
         size_t offset = 0;
         while (offset < file_size) {
@@ -286,8 +281,14 @@ int main(int argc, char** argv) {
             offset += nread;
         }
         
+#if USE_PICOPERF
+        BenchResult r = stop_measuring();
+        print_measured_results(r);
+        uint64_t elapsed_ns = r.nanoseconds;
+#else
         uint64_t elapsed_ns = stop_measuring(&timer);
         print_measured_results(elapsed_ns);
+#endif
         
         double elapsed_s = elapsed_ns / 1e9;
         double throughput = (file_size / (1024.0 * 1024 * 1024)) / elapsed_s;
@@ -325,39 +326,35 @@ int main(int argc, char** argv) {
     
     memset(tasks, 0, tasks_size);
     
-    // Initialize semaphores in shared memory
+    // Allocate two process-shared barriers in shared memory
+    size_t barriers_size = 2 * sizeof(portable_barrier_t);
+    portable_barrier_t* barriers = (portable_barrier_t*)mmap(NULL, barriers_size,
+                                                              PROT_READ | PROT_WRITE,
+                                                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (barriers == MAP_FAILED) {
+        fprintf(stderr, "[ERROR] Failed to allocate shared memory for barriers\n");
+        munmap(tasks, tasks_size);
+        for (int j = 0; j < NUM_BUFFERS; j++) {
+            munmap(buffers[j], buffer_size);
+        }
+        close(fd_in);
+        close(fd_out);
+        munmap(key_tables, sizeof(struct KeyTables));
+        return EXIT_MEMORY_ALLOC_FAIL;
+    }
+    portable_barrier_t* ready_barrier = &barriers[0];
+    portable_barrier_t* done_barrier  = &barriers[1];
+    portable_barrier_init(ready_barrier, num_workers + 1, 1);
+    portable_barrier_init(done_barrier,  num_workers + 1, 1);
+    
+    // Initialize worker tasks
     for (int i = 0; i < num_workers; i++) {
         tasks[i].worker_id = i;
-        tasks[i].core_id = i + 1;
+        tasks[i].core_id = get_nth_online_cpu(i + 1);
         tasks[i].shutdown = 0;
         tasks[i].key_tables = key_tables;  // Shared key tables
-        
-        #if defined(__linux__)
-        sem_init(&tasks[i].wake_sem, 1, 0);  // 1 = process-shared
-        sem_init(&tasks[i].done_sem, 1, 0);
-        #elif defined(__APPLE__)
-        char wake_name[64], done_name[64];
-        snprintf(wake_name, sizeof(wake_name), "/tc_wake_%d_%d", getpid(), i);
-        snprintf(done_name, sizeof(done_name), "/tc_done_%d_%d", getpid(), i);
-        
-        sem_unlink(wake_name);
-        sem_unlink(done_name);
-        
-        tasks[i].wake_sem = sem_open(wake_name, O_CREAT | O_EXCL, 0600, 0);
-        tasks[i].done_sem = sem_open(done_name, O_CREAT | O_EXCL, 0600, 0);
-        
-        if (tasks[i].wake_sem == SEM_FAILED || tasks[i].done_sem == SEM_FAILED) {
-            fprintf(stderr, "[ERROR] Failed to create semaphores for worker %d\n", i);
-            munmap(tasks, tasks_size);
-            for (int j = 0; j < NUM_BUFFERS; j++) {
-                munmap(buffers[j], buffer_size);
-            }
-            close(fd_in);
-            close(fd_out);
-            munmap(key_tables, sizeof(struct KeyTables));
-            return EXIT_WORKER_CRASH;
-        }
-        #endif
+        tasks[i].ready_barrier = ready_barrier;
+        tasks[i].done_barrier  = done_barrier;
     }
     
     // Fork worker processes
@@ -369,6 +366,9 @@ int main(int argc, char** argv) {
         if (pid < 0) {
             fprintf(stderr, "[ERROR] Failed to fork worker process %d\n", i);
             free(pids);
+            portable_barrier_destroy(ready_barrier);
+            portable_barrier_destroy(done_barrier);
+            munmap(barriers, barriers_size);
             munmap(tasks, tasks_size);
             for (int j = 0; j < NUM_BUFFERS; j++) {
                 munmap(buffers[j], buffer_size);
@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
         } else {
             // Parent - store PID
             pids[i] = pid;
-            printf("  Worker %d forked (PID %d, pinned to core %d)\n", i, pid, i + 1);
+            printf("  Worker %d forked (PID %d, pinned to core %d)\n", i, pid, tasks[i].core_id);
         }
     }
     
@@ -397,15 +397,20 @@ int main(int argc, char** argv) {
     
     printf("\nStarting three-buffer async I/O pipeline (PARENT ONLY)...\n\n");
     
+#if USE_PICOPERF
+    start_measuring();
+#else
     struct timespec timer;
     start_measuring(&timer);
+#endif
     
     // Three-buffer pipeline state (PARENT ONLY)
     size_t file_read_offset = 0;
     size_t file_write_offset = 0;
     int buf_index = 0;
     size_t chunk_sizes[NUM_BUFFERS] = {0};
-    size_t chunk_actual[NUM_BUFFERS] = {0};  // Actual bytes read (before padding)
+    size_t chunk_actual[NUM_BUFFERS] = {0};
+    size_t last_written_bytes = 0;  // Padded bytes written in the pending write
     AioHandle pending_read, pending_write;
     int have_pending_read = 0, have_pending_write = 0;
     
@@ -454,13 +459,19 @@ int main(int argc, char** argv) {
         // Step 4: Compute current buffer (overlaps read of next, write of prev).
         // Process the full padded size so the final partial block is encrypted.
         if (chunk_sizes[buf_index] > 0) {
-            dispatch_work(tasks, num_workers, buffers[buf_index], chunk_sizes[buf_index], mode, key_tables);
+            dispatch_work(ready_barrier, done_barrier, tasks, num_workers,
+                          buffers[buf_index], chunk_sizes[buf_index], mode, key_tables);
         }
         
         // Step 5: Wait for the previous write to finish.
         if (have_pending_write) {
             aio_wait(&pending_write);
             have_pending_write = 0;
+            #if defined(__linux__)
+            size_t completed_write_offset = file_write_offset - last_written_bytes;
+            posix_fadvise(fd_in,  (off_t)completed_write_offset, (off_t)last_written_bytes, POSIX_FADV_DONTNEED);
+            posix_fadvise(fd_out, (off_t)completed_write_offset, (off_t)last_written_bytes, POSIX_FADV_DONTNEED);
+            #endif
         }
         
         // Step 6: Fire write of this buffer. Write the full padded size so the
@@ -470,6 +481,7 @@ int main(int argc, char** argv) {
             size_t bytes_to_write = chunk_sizes[buf_index];
             aio_write_chunk(&pending_write, fd_out, buffers[buf_index], bytes_to_write, file_write_offset);
             have_pending_write = 1;
+            last_written_bytes = bytes_to_write;
             file_write_offset += bytes_to_write;
         }
         
@@ -479,20 +491,28 @@ int main(int argc, char** argv) {
     // Wait for final write
     if (have_pending_write) {
         aio_wait(&pending_write);
+        #if defined(__linux__)
+        size_t completed_write_offset = file_write_offset - last_written_bytes;
+        posix_fadvise(fd_in,  (off_t)completed_write_offset, (off_t)last_written_bytes, POSIX_FADV_DONTNEED);
+        posix_fadvise(fd_out, (off_t)completed_write_offset, (off_t)last_written_bytes, POSIX_FADV_DONTNEED);
+        #endif
     }
     
+#if USE_PICOPERF
+    BenchResult r = stop_measuring();
+    print_measured_results(r);
+    uint64_t elapsed_ns = r.nanoseconds;
+#else
     uint64_t elapsed_ns = stop_measuring(&timer);
+#endif
     
     // Shutdown workers
     printf("\nShutting down workers...\n");
     for (int i = 0; i < num_workers; i++) {
         tasks[i].shutdown = 1;
-        #if defined(__linux__)
-        sem_post(&tasks[i].wake_sem);
-        #elif defined(__APPLE__)
-        sem_post(tasks[i].wake_sem);
-        #endif
     }
+    portable_barrier_wait(ready_barrier);
+    portable_barrier_wait(done_barrier);
     
     // Wait for all worker processes
     for (int i = 0; i < num_workers; i++) {
@@ -502,21 +522,9 @@ int main(int argc, char** argv) {
     }
     
     // Cleanup
-    for (int i = 0; i < num_workers; i++) {
-        #if defined(__linux__)
-        sem_destroy(&tasks[i].wake_sem);
-        sem_destroy(&tasks[i].done_sem);
-        #elif defined(__APPLE__)
-        char wake_name[64], done_name[64];
-        snprintf(wake_name, sizeof(wake_name), "/tc_wake_%d_%d", getpid(), i);
-        snprintf(done_name, sizeof(done_name), "/tc_done_%d_%d", getpid(), i);
-        
-        sem_close(tasks[i].wake_sem);
-        sem_close(tasks[i].done_sem);
-        sem_unlink(wake_name);
-        sem_unlink(done_name);
-        #endif
-    }
+    portable_barrier_destroy(ready_barrier);
+    portable_barrier_destroy(done_barrier);
+    munmap(barriers, barriers_size);
     
     free(pids);
     munmap(tasks, tasks_size);
@@ -530,13 +538,18 @@ int main(int argc, char** argv) {
     munmap(key_tables, sizeof(struct KeyTables));
     
     printf("\nProcessing complete!\n");
+#if !USE_PICOPERF
     print_measured_results(elapsed_ns);
+#endif
     
     double elapsed_s = elapsed_ns / 1e9;
     double throughput = (file_size / (1024.0 * 1024 * 1024)) / elapsed_s;
     printf("Throughput: %.2f GB/s\n", throughput);
     printf("Speedup: %.2fx vs single-core\n\n", throughput / 0.25);
     
+#if USE_PICOPERF
+    picoperf_fini();
+#endif
     printf("Done!\n");
     return EXIT_SUCCESS;
 }

@@ -557,7 +557,6 @@ int main(int argc, char **argv)
         size_t bytes_read;
         while ((bytes_read = fread(batch_buf, 1, BATCH_SIZE, reader)) > 0)
         {
-            size_t bytes_read_orig = bytes_read;
 
             size_t padded = ((bytes_read + 127) / 128) * 128;
             if (padded > bytes_read)

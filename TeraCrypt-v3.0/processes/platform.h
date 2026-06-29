@@ -26,6 +26,8 @@
 
 int get_core_count(void);
 
+int get_nth_online_cpu(int n);
+
 void pin_to_core(int core_id);
 
 size_t get_available_ram(void);

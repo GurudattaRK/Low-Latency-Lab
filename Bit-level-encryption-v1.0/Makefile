@@ -108,8 +108,11 @@ ifeq ($(CC_IS_CLANG),1)
 pgo:
 	@mkdir -p $(PGO_DIR)
 	$(CC) $(CFLAGS) $(PGO_GEN) $(INC_FLAGS) -o $(TARGET)_gen $(ALL_SRC)
-	printf '1\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
-	printf '2\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
+	@echo "Running training workload (encrypt)..."
+	./$(TARGET)_gen encrypt /home/strange/tc_test/odd.data /home/strange/tc_test/test.key >/dev/null 2>&1 || true
+	@echo "Running training workload (decrypt)..."
+	./$(TARGET)_gen decrypt /home/strange/tc_test/odd.data.locked /home/strange/tc_test/test.key >/dev/null 2>&1 || true
+	@rm -f /home/strange/tc_test/odd.data.locked /home/strange/tc_test/odd.data.locked.unlocked
 	llvm-profdata merge -output=$(PGO_DIR)/profile.clangprofdata \
 	                  $(PGO_DIR)/profile.clangraw
 	$(CC) $(CFLAGS) $(PGO_USE) $(INC_FLAGS) -o $(TARGET) $(ALL_SRC)
@@ -117,8 +120,11 @@ pgo:
 else
 pgo:
 	$(CC) $(CFLAGS) $(PGO_GEN) $(INC_FLAGS) -o $(TARGET)_gen $(ALL_SRC)
-	printf '1\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
-	printf '2\n' | ./$(TARGET)_gen >/dev/null 2>&1 || true
+	@echo "Running training workload (encrypt)..."
+	./$(TARGET)_gen encrypt /home/strange/tc_test/odd.data /home/strange/tc_test/test.key >/dev/null 2>&1 || true
+	@echo "Running training workload (decrypt)..."
+	./$(TARGET)_gen decrypt /home/strange/tc_test/odd.data.locked /home/strange/tc_test/test.key >/dev/null 2>&1 || true
+	@rm -f /home/strange/tc_test/odd.data.locked /home/strange/tc_test/odd.data.locked.unlocked
 	$(CC) $(CFLAGS) $(PGO_USE) $(INC_FLAGS) -o $(TARGET) $(ALL_SRC)
 	$(RM) $(TARGET)_gen
 endif

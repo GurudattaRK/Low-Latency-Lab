@@ -94,6 +94,42 @@ int get_core_count(void) {
     #endif
 }
 
+int get_nth_online_cpu(int n)
+{
+    #if defined(__linux__)
+    static int online_cpus[128];
+    static int num_online = 0;
+    static int initialized = 0;
+    if (!initialized) {
+        FILE* fp = fopen("/sys/devices/system/cpu/online", "r");
+        if (fp) {
+            char buf[256];
+            if (fgets(buf, sizeof(buf), fp)) {
+                char* p = buf;
+                while (*p) {
+                    int start = -1, end = -1;
+                    if (sscanf(p, "%d-%d", &start, &end) == 2 && start >= 0 && end >= start) {
+                        for (int i = start; i <= end && num_online < 128; i++) {
+                            online_cpus[num_online++] = i;
+                        }
+                    } else if (sscanf(p, "%d", &start) == 1 && start >= 0) {
+                        online_cpus[num_online++] = start;
+                    }
+                    while (*p && *p != ',') p++;
+                    if (*p == ',') p++;
+                }
+            }
+            fclose(fp);
+        }
+        initialized = 1;
+    }
+    if (n < 0 || n >= num_online) return n;
+    return online_cpus[n];
+    #else
+    return n;
+    #endif
+}
+
 void pin_to_core(int core_id) {
     #if defined(__linux__)
     cpu_set_t cpuset;
