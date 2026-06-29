@@ -18,6 +18,7 @@ int get_core_count(void) {
     if (!core_ids) return 1;
     
     int unique_count = 0;
+    int consecutive_failures = 0;
     
     for (int cpu = 0; cpu < max_cores; cpu++) {
         char path[256];
@@ -25,8 +26,14 @@ int get_core_count(void) {
                 "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
         
         FILE* fp = fopen(path, "r");
-        if (!fp) break;
+        if (!fp) {
+            consecutive_failures++;
+            // Stop only after many consecutive missing CPUs to handle sparse numbering
+            if (consecutive_failures > 32) break;
+            continue;
+        }
         
+        consecutive_failures = 0;
         int core_id;
         if (fscanf(fp, "%d", &core_id) == 1) {
             int found = 0;

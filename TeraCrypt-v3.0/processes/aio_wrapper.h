@@ -20,13 +20,15 @@ typedef struct {
     #endif
 } AioHandle;
 
-// Initialize an async read operation
+// Initialize an async read/write operation.
+// The AioHandle is filled in-place; it MUST remain at a stable address until
+// aio_wait() returns, because POSIX AIO tracks the aiocb by pointer.
 #if defined(_WIN32)
-AioHandle aio_read_chunk(HANDLE fh, void* buf, size_t size, uint64_t offset);
-AioHandle aio_write_chunk(HANDLE fh, void* buf, size_t size, uint64_t offset);
+void aio_read_chunk(AioHandle* h, HANDLE fh, void* buf, size_t size, uint64_t offset);
+void aio_write_chunk(AioHandle* h, HANDLE fh, void* buf, size_t size, uint64_t offset);
 #else
-AioHandle aio_read_chunk(int fd, void* buf, size_t size, off_t offset);
-AioHandle aio_write_chunk(int fd, void* buf, size_t size, off_t offset);
+void aio_read_chunk(AioHandle* h, int fd, void* buf, size_t size, off_t offset);
+void aio_write_chunk(AioHandle* h, int fd, void* buf, size_t size, off_t offset);
 #endif
 
 // Wait for an async operation to complete

@@ -607,7 +607,8 @@ int main(int argc, char **argv)
 #if HAVE_AVX2
             _mm_sfence();
 #endif
-            fwrite(batch_buf, 1, bytes_read_orig, writer);
+                // Write full padded size so encrypted file is always a multiple of 128 bytes
+                fwrite(batch_buf, 1, padded, writer);
         }
 
         STOP_MEASURING(timer);

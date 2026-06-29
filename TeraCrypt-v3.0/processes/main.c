@@ -80,13 +80,19 @@ static void dispatch_work(WorkerTask* tasks, int num_workers, uint8_t* buffer,
                          size_t chunk_size, OperationMode mode, const struct KeyTables* key_tables) {
     if (chunk_size == 0) return;
     
-    size_t base_size = chunk_size / (num_workers + 1);
-    size_t remainder = chunk_size % (num_workers + 1);
+    // Split on 128-byte block boundaries so no worker ever starts mid-block
+    // and there are no unencrypted gaps between worker regions. Only complete
+    // blocks are processed; any trailing < 128 bytes are passed through
+    // unchanged (handled identically on encrypt and decrypt).
+    size_t total_blocks = chunk_size / BLOCK_SIZE;
+    size_t base_blocks  = total_blocks / (num_workers + 1);
+    size_t extra_blocks = total_blocks % (num_workers + 1);
     size_t offset = 0;
     
-    // Assign work to workers
+    // Assign work to workers (block-aligned regions)
     for (int i = 0; i < num_workers; i++) {
-        size_t sz = base_size + (i < (int)remainder ? 1 : 0);
+        size_t blocks = base_blocks + ((size_t)i < extra_blocks ? 1 : 0);
+        size_t sz = blocks * BLOCK_SIZE;
         tasks[i].buffer = buffer + offset;
         tasks[i].region_size = sz;
         tasks[i].mode = mode;
@@ -101,9 +107,11 @@ static void dispatch_work(WorkerTask* tasks, int num_workers, uint8_t* buffer,
         offset += sz;
     }
     
-    // Parent processes its chunk
-    if (offset < chunk_size) {
-        process_region(buffer + offset, chunk_size - offset, mode, key_tables);
+    // Parent processes the remaining complete blocks (the trailing
+    // chunk_size % 128 tail bytes are intentionally left untouched).
+    size_t parent_blocks = total_blocks - base_blocks * num_workers - extra_blocks;
+    if (parent_blocks > 0) {
+        process_region(buffer + offset, parent_blocks * BLOCK_SIZE, mode, key_tables);
     }
     
     // Wait for all workers
@@ -259,16 +267,18 @@ int main(int argc, char** argv) {
             ssize_t nread = pread(fd_in, buffers[0], to_read, offset);
             if (nread <= 0) break;
             
-            // Pad to 128-byte boundary
-            size_t padded_size = ((nread + 127) / 128) * 128;
+            // Pad the final partial block with zeros to a full 128-byte block,
+            // then encrypt everything. The padded bytes are persisted, so the
+            // output is rounded up to a multiple of 128.
+            size_t padded_size = (((size_t)nread + 127) / 128) * 128;
             if (padded_size > (size_t)nread) {
                 memset(buffers[0] + nread, 0, padded_size - nread);
             }
             
             process_region(buffers[0], padded_size, mode, key_tables);
             
-            ssize_t nwritten = pwrite(fd_out, buffers[0], nread, offset);
-            if (nwritten != nread) {
+            ssize_t nwritten = pwrite(fd_out, buffers[0], padded_size, offset);
+            if (nwritten != (ssize_t)padded_size) {
                 fprintf(stderr, "[ERROR] Write failed\n");
                 break;
             }
@@ -395,6 +405,7 @@ int main(int argc, char** argv) {
     size_t file_write_offset = 0;
     int buf_index = 0;
     size_t chunk_sizes[NUM_BUFFERS] = {0};
+    size_t chunk_actual[NUM_BUFFERS] = {0};  // Actual bytes read (before padding)
     AioHandle pending_read, pending_write;
     int have_pending_read = 0, have_pending_write = 0;
     
@@ -402,63 +413,67 @@ int main(int argc, char** argv) {
     size_t first_chunk = (file_size < buffer_size) ? file_size : buffer_size;
     ssize_t nread = pread(fd_in, buffers[0], first_chunk, 0);
     if (nread > 0) {
-        chunk_sizes[0] = nread;
         file_read_offset = nread;
+        chunk_actual[0] = (size_t)nread;
         
         // Pad to 128-byte boundary
         size_t padded = ((nread + 127) / 128) * 128;
         if (padded > (size_t)nread) {
             memset(buffers[0] + nread, 0, padded - nread);
-            chunk_sizes[0] = padded;
         }
+        chunk_sizes[0] = padded;
     }
     
     while (file_write_offset < file_size) {
-        // Process current buffer (dispatch to workers)
+        // Step 1 & 2: Wait for this buffer's read to finish, then pad it.
+        if (have_pending_read) {
+            aio_wait(&pending_read);
+            have_pending_read = 0;
+            size_t actual = chunk_actual[buf_index];
+            size_t padded = ((actual + 127) / 128) * 128;
+            if (padded > actual) {
+                memset(buffers[buf_index] + actual, 0, padded - actual);
+            }
+            chunk_sizes[buf_index] = padded;
+        }
+        
+        // Step 3: Fire next read BEFORE compute so it overlaps the cipher.
+        int next_buf = (buf_index + 1) % NUM_BUFFERS;
+        if (file_read_offset < file_size) {
+            size_t to_read = (file_size - file_read_offset < buffer_size) ? 
+                            (file_size - file_read_offset) : buffer_size;
+            aio_read_chunk(&pending_read, fd_in, buffers[next_buf], to_read, file_read_offset);
+            have_pending_read = 1;
+            chunk_actual[next_buf] = to_read;
+            file_read_offset += to_read;
+        } else {
+            chunk_sizes[next_buf] = 0;
+            chunk_actual[next_buf] = 0;
+        }
+        
+        // Step 4: Compute current buffer (overlaps read of next, write of prev).
+        // Process the full padded size so the final partial block is encrypted.
         if (chunk_sizes[buf_index] > 0) {
             dispatch_work(tasks, num_workers, buffers[buf_index], chunk_sizes[buf_index], mode, key_tables);
         }
         
-        // Wait for pending write to complete (if any)
+        // Step 5: Wait for the previous write to finish.
         if (have_pending_write) {
             aio_wait(&pending_write);
             have_pending_write = 0;
         }
         
-        // Start async write of processed buffer
+        // Step 6: Fire write of this buffer. Write the full padded size so the
+        // zero-padded final block is persisted; the output file is rounded up
+        // to a multiple of 128 bytes.
         if (chunk_sizes[buf_index] > 0) {
             size_t bytes_to_write = chunk_sizes[buf_index];
-            if (file_write_offset + bytes_to_write > file_size) {
-                bytes_to_write = file_size - file_write_offset;
-            }
-            
-            pending_write = aio_write_chunk(fd_out, buffers[buf_index], bytes_to_write, file_write_offset);
+            aio_write_chunk(&pending_write, fd_out, buffers[buf_index], bytes_to_write, file_write_offset);
             have_pending_write = 1;
             file_write_offset += bytes_to_write;
         }
         
-        // Move to next buffer
-        buf_index = (buf_index + 1) % NUM_BUFFERS;
-        
-        // Wait for pending read to complete (if any)
-        if (have_pending_read) {
-            aio_wait(&pending_read);
-            have_pending_read = 0;
-        }
-        
-        // Start async read into next buffer (if more data)
-        if (file_read_offset < file_size) {
-            size_t to_read = (file_size - file_read_offset < buffer_size) ? 
-                            (file_size - file_read_offset) : buffer_size;
-            
-            pending_read = aio_read_chunk(fd_in, buffers[buf_index], to_read, file_read_offset);
-            have_pending_read = 1;
-            
-            chunk_sizes[buf_index] = to_read;
-            file_read_offset += to_read;
-        } else {
-            chunk_sizes[buf_index] = 0;
-        }
+        buf_index = next_buf;
     }
     
     // Wait for final write

@@ -28,18 +28,10 @@
 #endif
 
 #if defined(__clang__)
-    #define rotate_left(x,n)  __builtin_rotateleft32((x),(n))
     #define rotate_right(x,n) __builtin_rotateright32((x),(n))
 #elif defined(__GNUC__) && __GNUC__ >= 15
-    #define rotate_left(x,n)  __builtin_stdc_rotate_left((x),(n))
     #define rotate_right(x,n) __builtin_stdc_rotate_right((x),(n))
 #else
-static inline uint32_t rotate_left(uint32_t x, unsigned n)
-{
-    n &= 31;
-    return (x << n) | (x >> ((32 - n) & 31));
-}
-
 static inline uint32_t rotate_right(uint32_t x, unsigned n)
 {
     n &= 31;
@@ -124,16 +116,31 @@ void precompute_key_tables(const uint32_t key_matrix[32], struct KeyTables* tabl
         for (int i = 0; i < 32; i++)
         {
             int amt;
+            
+            // Encryption phase 0: originally even=left, odd=right
+            // Convert even lanes to equivalent right-rotate amount
             amt = (ke_rot0 + i + (i & 1)) & 31;
+            if (!(i & 1))
+                amt = (32 - amt) & 31;
             tables->scalar_rot_amount[0][round][0][i] = (uint8_t)amt;
 
+            // Encryption phase 1: originally even=right, odd=left
+            // Convert odd lanes to equivalent right-rotate amount
             amt = (ke_rot1 + i + (i & 1)) & 31;
+            if (i & 1)
+                amt = (32 - amt) & 31;
             tables->scalar_rot_amount[0][round][1][i] = (uint8_t)amt;
 
+            // Decryption phase 0: same pattern as encryption phase 0
             amt = (kd_rot0 + i + (i & 1)) & 31;
+            if (!(i & 1))
+                amt = (32 - amt) & 31;
             tables->scalar_rot_amount[1][round][0][i] = (uint8_t)amt;
 
+            // Decryption phase 1: same pattern as encryption phase 1
             amt = (kd_rot1 + i + (i & 1)) & 31;
+            if (i & 1)
+                amt = (32 - amt) & 31;
             tables->scalar_rot_amount[1][round][1][i] = (uint8_t)amt;
         }
 
@@ -206,15 +213,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
-        a0 = rotate_avx2_phase0(a0, amounts[round][0][0]);
-        a1 = rotate_avx2_phase0(a1, amounts[round][0][1]);
-        a2 = rotate_avx2_phase0(a2, amounts[round][0][2]);
-        a3 = rotate_avx2_phase0(a3, amounts[round][0][3]);
+        a0 = rotate_all_right(a0, amounts[round][0][0]);
+        a1 = rotate_all_right(a1, amounts[round][0][1]);
+        a2 = rotate_all_right(a2, amounts[round][0][2]);
+        a3 = rotate_all_right(a3, amounts[round][0][3]);
         
-        b0 = rotate_avx2_phase0(b0, amounts[round][0][0]);
-        b1 = rotate_avx2_phase0(b1, amounts[round][0][1]);
-        b2 = rotate_avx2_phase0(b2, amounts[round][0][2]);
-        b3 = rotate_avx2_phase0(b3, amounts[round][0][3]);
+        b0 = rotate_all_right(b0, amounts[round][0][0]);
+        b1 = rotate_all_right(b1, amounts[round][0][1]);
+        b2 = rotate_all_right(b2, amounts[round][0][2]);
+        b3 = rotate_all_right(b3, amounts[round][0][3]);
         
         a3 = _mm256_xor_si256(a3, xor_vec[round][0]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][0]);
@@ -222,15 +229,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
 
-        a0 = rotate_avx2_phase1(a0, amounts[round][1][0]);
-        a1 = rotate_avx2_phase1(a1, amounts[round][1][1]);
-        a2 = rotate_avx2_phase1(a2, amounts[round][1][2]);
-        a3 = rotate_avx2_phase1(a3, amounts[round][1][3]);
+        a0 = rotate_all_right(a0, amounts[round][1][0]);
+        a1 = rotate_all_right(a1, amounts[round][1][1]);
+        a2 = rotate_all_right(a2, amounts[round][1][2]);
+        a3 = rotate_all_right(a3, amounts[round][1][3]);
         
-        b0 = rotate_avx2_phase1(b0, amounts[round][1][0]);
-        b1 = rotate_avx2_phase1(b1, amounts[round][1][1]);
-        b2 = rotate_avx2_phase1(b2, amounts[round][1][2]);
-        b3 = rotate_avx2_phase1(b3, amounts[round][1][3]);
+        b0 = rotate_all_right(b0, amounts[round][1][0]);
+        b1 = rotate_all_right(b1, amounts[round][1][1]);
+        b2 = rotate_all_right(b2, amounts[round][1][2]);
+        b3 = rotate_all_right(b3, amounts[round][1][3]);
         
         a3 = _mm256_xor_si256(a3, xor_vec[round][1]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][1]);
@@ -273,15 +280,15 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         a3 = _mm256_xor_si256(a3, xor_vec[round][0]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][0]);
         
-        a0 = rotate_avx2_phase0(a0, amounts[round][0][0]);
-        a1 = rotate_avx2_phase0(a1, amounts[round][0][1]);
-        a2 = rotate_avx2_phase0(a2, amounts[round][0][2]);
-        a3 = rotate_avx2_phase0(a3, amounts[round][0][3]);
+        a0 = rotate_all_right(a0, amounts[round][0][0]);
+        a1 = rotate_all_right(a1, amounts[round][0][1]);
+        a2 = rotate_all_right(a2, amounts[round][0][2]);
+        a3 = rotate_all_right(a3, amounts[round][0][3]);
         
-        b0 = rotate_avx2_phase0(b0, amounts[round][0][0]);
-        b1 = rotate_avx2_phase0(b1, amounts[round][0][1]);
-        b2 = rotate_avx2_phase0(b2, amounts[round][0][2]);
-        b3 = rotate_avx2_phase0(b3, amounts[round][0][3]);
+        b0 = rotate_all_right(b0, amounts[round][0][0]);
+        b1 = rotate_all_right(b1, amounts[round][0][1]);
+        b2 = rotate_all_right(b2, amounts[round][0][2]);
+        b3 = rotate_all_right(b3, amounts[round][0][3]);
 
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
@@ -289,15 +296,15 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         a3 = _mm256_xor_si256(a3, xor_vec[round][1]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][1]);
         
-        a0 = rotate_avx2_phase1(a0, amounts[round][1][0]);
-        a1 = rotate_avx2_phase1(a1, amounts[round][1][1]);
-        a2 = rotate_avx2_phase1(a2, amounts[round][1][2]);
-        a3 = rotate_avx2_phase1(a3, amounts[round][1][3]);
+        a0 = rotate_all_right(a0, amounts[round][1][0]);
+        a1 = rotate_all_right(a1, amounts[round][1][1]);
+        a2 = rotate_all_right(a2, amounts[round][1][2]);
+        a3 = rotate_all_right(a3, amounts[round][1][3]);
         
-        b0 = rotate_avx2_phase1(b0, amounts[round][1][0]);
-        b1 = rotate_avx2_phase1(b1, amounts[round][1][1]);
-        b2 = rotate_avx2_phase1(b2, amounts[round][1][2]);
-        b3 = rotate_avx2_phase1(b3, amounts[round][1][3]);
+        b0 = rotate_all_right(b0, amounts[round][1][0]);
+        b1 = rotate_all_right(b1, amounts[round][1][1]);
+        b2 = rotate_all_right(b2, amounts[round][1][2]);
+        b3 = rotate_all_right(b3, amounts[round][1][3]);
     }
 
     _mm256_storeu_si256((__m256i *)&a[0],  a0);
@@ -321,7 +328,7 @@ FORCE_INLINE void encrypt_block_scalar(uint32_t *state,
     {
         UNROLL_16
         for (int i = 0; i < 32; i += 2) {
-            state[i] = rotate_left(state[i], rot_amt[round][0][i]);
+            state[i] = rotate_right(state[i], rot_amt[round][0][i]);
             state[i+1] = rotate_right(state[i+1], rot_amt[round][0][i+1]);
         }
         state[31] ^= xor_key[round][0];
@@ -330,7 +337,7 @@ FORCE_INLINE void encrypt_block_scalar(uint32_t *state,
         UNROLL_16
         for (int i = 0; i < 32; i += 2) {
             state[i] = rotate_right(state[i], rot_amt[round][1][i]);
-            state[i+1] = rotate_left(state[i+1], rot_amt[round][1][i+1]);
+            state[i+1] = rotate_right(state[i+1], rot_amt[round][1][i+1]);
         }
         state[31] ^= xor_key[round][1];
         transpose_matrix_scalar(state);
@@ -348,7 +355,7 @@ FORCE_INLINE void decrypt_block_scalar(uint32_t *state,
         state[31] ^= xor_key[round][0];
         UNROLL_16
         for (int i = 0; i < 32; i += 2) {
-            state[i] = rotate_left(state[i], rot_amt[round][0][i]);
+            state[i] = rotate_right(state[i], rot_amt[round][0][i]);
             state[i+1] = rotate_right(state[i+1], rot_amt[round][0][i+1]);
         }
 
@@ -357,7 +364,7 @@ FORCE_INLINE void decrypt_block_scalar(uint32_t *state,
         UNROLL_16
         for (int i = 0; i < 32; i += 2) {
             state[i] = rotate_right(state[i], rot_amt[round][1][i]);
-            state[i+1] = rotate_left(state[i+1], rot_amt[round][1][i+1]);
+            state[i+1] = rotate_right(state[i+1], rot_amt[round][1][i+1]);
         }
     }
 }
