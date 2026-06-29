@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdalign.h>
+#include <string.h>
 
 /* Compiler-specific loop unroll hints. The loop counts are fixed at compile time. */
 #if defined(__GNUC__) && !defined(__clang__)
@@ -205,20 +206,28 @@ static void precompute_key_tables(const uint32_t *key_matrix)
         {
             int amt;
 
-            /* Encryption phase 0: even left, odd right. */
+            /* Encryption phase 0: convert even lanes to right-rotate. */
             amt = (ke_rot0 + i + (i & 1)) & 31;
+            if (!(i & 1))
+                amt = (32 - amt) & 31;
             scalar_rot_amount[0][round][0][i] = (uint8_t)amt;
 
-            /* Encryption phase 1: even right, odd left. */
+            /* Encryption phase 1: convert odd lanes to right-rotate. */
             amt = (ke_rot1 + i + (i & 1)) & 31;
+            if (i & 1)
+                amt = (32 - amt) & 31;
             scalar_rot_amount[0][round][1][i] = (uint8_t)amt;
 
-            /* Decryption phase 0: even left, odd right. */
+            /* Decryption phase 0: convert even lanes to right-rotate. */
             amt = (kd_rot0 + i + (i & 1)) & 31;
+            if (!(i & 1))
+                amt = (32 - amt) & 31;
             scalar_rot_amount[1][round][0][i] = (uint8_t)amt;
 
-            /* Decryption phase 1: even right, odd left. */
+            /* Decryption phase 1: convert odd lanes to right-rotate. */
             amt = (kd_rot1 + i + (i & 1)) & 31;
+            if (i & 1)
+                amt = (32 - amt) & 31;
             scalar_rot_amount[1][round][1][i] = (uint8_t)amt;
         }
 
@@ -291,25 +300,25 @@ FORCE_INLINE void encrypt_block_avx2(uint32_t *state,
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
-        r0 = rotate_avx2_phase0(r0, amounts[round][0][0]);
-        r1 = rotate_avx2_phase0(r1, amounts[round][0][1]);
-        r2 = rotate_avx2_phase0(r2, amounts[round][0][2]);
-        r3 = rotate_avx2_phase0(r3, amounts[round][0][3]);
+        r0 = rotate_all_right(r0, amounts[round][0][0]);
+        r1 = rotate_all_right(r1, amounts[round][0][1]);
+        r2 = rotate_all_right(r2, amounts[round][0][2]);
+        r3 = rotate_all_right(r3, amounts[round][0][3]);
         r3 = _mm256_xor_si256(r3, xor_vec[round][0]);
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
 
-        r0 = rotate_avx2_phase1(r0, amounts[round][1][0]);
-        r1 = rotate_avx2_phase1(r1, amounts[round][1][1]);
-        r2 = rotate_avx2_phase1(r2, amounts[round][1][2]);
-        r3 = rotate_avx2_phase1(r3, amounts[round][1][3]);
+        r0 = rotate_all_right(r0, amounts[round][1][0]);
+        r1 = rotate_all_right(r1, amounts[round][1][1]);
+        r2 = rotate_all_right(r2, amounts[round][1][2]);
+        r3 = rotate_all_right(r3, amounts[round][1][3]);
         r3 = _mm256_xor_si256(r3, xor_vec[round][1]);
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
     }
 
-    _mm256_storeu_si256((__m256i *)&state[0],  r0);
-    _mm256_storeu_si256((__m256i *)&state[8],  r1);
-    _mm256_storeu_si256((__m256i *)&state[16], r2);
-    _mm256_storeu_si256((__m256i *)&state[24], r3);
+    _mm256_stream_si256((__m256i *)&state[0],  r0);
+    _mm256_stream_si256((__m256i *)&state[8],  r1);
+    _mm256_stream_si256((__m256i *)&state[16], r2);
+    _mm256_stream_si256((__m256i *)&state[24], r3);
 }
 
 /*
@@ -329,23 +338,23 @@ FORCE_INLINE void decrypt_block_avx2(uint32_t *state,
     {
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
         r3 = _mm256_xor_si256(r3, xor_vec[round][0]);
-        r0 = rotate_avx2_phase0(r0, amounts[round][0][0]);
-        r1 = rotate_avx2_phase0(r1, amounts[round][0][1]);
-        r2 = rotate_avx2_phase0(r2, amounts[round][0][2]);
-        r3 = rotate_avx2_phase0(r3, amounts[round][0][3]);
+        r0 = rotate_all_right(r0, amounts[round][0][0]);
+        r1 = rotate_all_right(r1, amounts[round][0][1]);
+        r2 = rotate_all_right(r2, amounts[round][0][2]);
+        r3 = rotate_all_right(r3, amounts[round][0][3]);
 
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
         r3 = _mm256_xor_si256(r3, xor_vec[round][1]);
-        r0 = rotate_avx2_phase1(r0, amounts[round][1][0]);
-        r1 = rotate_avx2_phase1(r1, amounts[round][1][1]);
-        r2 = rotate_avx2_phase1(r2, amounts[round][1][2]);
-        r3 = rotate_avx2_phase1(r3, amounts[round][1][3]);
+        r0 = rotate_all_right(r0, amounts[round][1][0]);
+        r1 = rotate_all_right(r1, amounts[round][1][1]);
+        r2 = rotate_all_right(r2, amounts[round][1][2]);
+        r3 = rotate_all_right(r3, amounts[round][1][3]);
     }
 
-    _mm256_storeu_si256((__m256i *)&state[0],  r0);
-    _mm256_storeu_si256((__m256i *)&state[8],  r1);
-    _mm256_storeu_si256((__m256i *)&state[16], r2);
-    _mm256_storeu_si256((__m256i *)&state[24], r3);
+    _mm256_stream_si256((__m256i *)&state[0],  r0);
+    _mm256_stream_si256((__m256i *)&state[8],  r1);
+    _mm256_stream_si256((__m256i *)&state[16], r2);
+    _mm256_stream_si256((__m256i *)&state[24], r3);
 }
 
 /*
@@ -370,15 +379,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
-        a0 = rotate_avx2_phase0(a0, amounts[round][0][0]);
-        a1 = rotate_avx2_phase0(a1, amounts[round][0][1]);
-        a2 = rotate_avx2_phase0(a2, amounts[round][0][2]);
-        a3 = rotate_avx2_phase0(a3, amounts[round][0][3]);
+        a0 = rotate_all_right(a0, amounts[round][0][0]);
+        a1 = rotate_all_right(a1, amounts[round][0][1]);
+        a2 = rotate_all_right(a2, amounts[round][0][2]);
+        a3 = rotate_all_right(a3, amounts[round][0][3]);
 
-        b0 = rotate_avx2_phase0(b0, amounts[round][0][0]);
-        b1 = rotate_avx2_phase0(b1, amounts[round][0][1]);
-        b2 = rotate_avx2_phase0(b2, amounts[round][0][2]);
-        b3 = rotate_avx2_phase0(b3, amounts[round][0][3]);
+        b0 = rotate_all_right(b0, amounts[round][0][0]);
+        b1 = rotate_all_right(b1, amounts[round][0][1]);
+        b2 = rotate_all_right(b2, amounts[round][0][2]);
+        b3 = rotate_all_right(b3, amounts[round][0][3]);
 
         a3 = _mm256_xor_si256(a3, xor_vec[round][0]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][0]);
@@ -386,15 +395,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
 
-        a0 = rotate_avx2_phase1(a0, amounts[round][1][0]);
-        a1 = rotate_avx2_phase1(a1, amounts[round][1][1]);
-        a2 = rotate_avx2_phase1(a2, amounts[round][1][2]);
-        a3 = rotate_avx2_phase1(a3, amounts[round][1][3]);
+        a0 = rotate_all_right(a0, amounts[round][1][0]);
+        a1 = rotate_all_right(a1, amounts[round][1][1]);
+        a2 = rotate_all_right(a2, amounts[round][1][2]);
+        a3 = rotate_all_right(a3, amounts[round][1][3]);
 
-        b0 = rotate_avx2_phase1(b0, amounts[round][1][0]);
-        b1 = rotate_avx2_phase1(b1, amounts[round][1][1]);
-        b2 = rotate_avx2_phase1(b2, amounts[round][1][2]);
-        b3 = rotate_avx2_phase1(b3, amounts[round][1][3]);
+        b0 = rotate_all_right(b0, amounts[round][1][0]);
+        b1 = rotate_all_right(b1, amounts[round][1][1]);
+        b2 = rotate_all_right(b2, amounts[round][1][2]);
+        b3 = rotate_all_right(b3, amounts[round][1][3]);
 
         a3 = _mm256_xor_si256(a3, xor_vec[round][1]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][1]);
@@ -403,15 +412,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
     }
 
-    _mm256_storeu_si256((__m256i *)&a[0],  a0);
-    _mm256_storeu_si256((__m256i *)&a[8],  a1);
-    _mm256_storeu_si256((__m256i *)&a[16], a2);
-    _mm256_storeu_si256((__m256i *)&a[24], a3);
+    _mm256_stream_si256((__m256i *)&a[0],  a0);
+    _mm256_stream_si256((__m256i *)&a[8],  a1);
+    _mm256_stream_si256((__m256i *)&a[16], a2);
+    _mm256_stream_si256((__m256i *)&a[24], a3);
 
-    _mm256_storeu_si256((__m256i *)&b[0],  b0);
-    _mm256_storeu_si256((__m256i *)&b[8],  b1);
-    _mm256_storeu_si256((__m256i *)&b[16], b2);
-    _mm256_storeu_si256((__m256i *)&b[24], b3);
+    _mm256_stream_si256((__m256i *)&b[0],  b0);
+    _mm256_stream_si256((__m256i *)&b[8],  b1);
+    _mm256_stream_si256((__m256i *)&b[16], b2);
+    _mm256_stream_si256((__m256i *)&b[24], b3);
 }
 
 /*
@@ -440,15 +449,15 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         a3 = _mm256_xor_si256(a3, xor_vec[round][0]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][0]);
 
-        a0 = rotate_avx2_phase0(a0, amounts[round][0][0]);
-        a1 = rotate_avx2_phase0(a1, amounts[round][0][1]);
-        a2 = rotate_avx2_phase0(a2, amounts[round][0][2]);
-        a3 = rotate_avx2_phase0(a3, amounts[round][0][3]);
+        a0 = rotate_all_right(a0, amounts[round][0][0]);
+        a1 = rotate_all_right(a1, amounts[round][0][1]);
+        a2 = rotate_all_right(a2, amounts[round][0][2]);
+        a3 = rotate_all_right(a3, amounts[round][0][3]);
 
-        b0 = rotate_avx2_phase0(b0, amounts[round][0][0]);
-        b1 = rotate_avx2_phase0(b1, amounts[round][0][1]);
-        b2 = rotate_avx2_phase0(b2, amounts[round][0][2]);
-        b3 = rotate_avx2_phase0(b3, amounts[round][0][3]);
+        b0 = rotate_all_right(b0, amounts[round][0][0]);
+        b1 = rotate_all_right(b1, amounts[round][0][1]);
+        b2 = rotate_all_right(b2, amounts[round][0][2]);
+        b3 = rotate_all_right(b3, amounts[round][0][3]);
 
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
@@ -456,54 +465,56 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         a3 = _mm256_xor_si256(a3, xor_vec[round][1]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][1]);
 
-        a0 = rotate_avx2_phase1(a0, amounts[round][1][0]);
-        a1 = rotate_avx2_phase1(a1, amounts[round][1][1]);
-        a2 = rotate_avx2_phase1(a2, amounts[round][1][2]);
-        a3 = rotate_avx2_phase1(a3, amounts[round][1][3]);
+        a0 = rotate_all_right(a0, amounts[round][1][0]);
+        a1 = rotate_all_right(a1, amounts[round][1][1]);
+        a2 = rotate_all_right(a2, amounts[round][1][2]);
+        a3 = rotate_all_right(a3, amounts[round][1][3]);
 
-        b0 = rotate_avx2_phase1(b0, amounts[round][1][0]);
-        b1 = rotate_avx2_phase1(b1, amounts[round][1][1]);
-        b2 = rotate_avx2_phase1(b2, amounts[round][1][2]);
-        b3 = rotate_avx2_phase1(b3, amounts[round][1][3]);
+        b0 = rotate_all_right(b0, amounts[round][1][0]);
+        b1 = rotate_all_right(b1, amounts[round][1][1]);
+        b2 = rotate_all_right(b2, amounts[round][1][2]);
+        b3 = rotate_all_right(b3, amounts[round][1][3]);
     }
 
-    _mm256_storeu_si256((__m256i *)&a[0],  a0);
-    _mm256_storeu_si256((__m256i *)&a[8],  a1);
-    _mm256_storeu_si256((__m256i *)&a[16], a2);
-    _mm256_storeu_si256((__m256i *)&a[24], a3);
+    _mm256_stream_si256((__m256i *)&a[0],  a0);
+    _mm256_stream_si256((__m256i *)&a[8],  a1);
+    _mm256_stream_si256((__m256i *)&a[16], a2);
+    _mm256_stream_si256((__m256i *)&a[24], a3);
 
-    _mm256_storeu_si256((__m256i *)&b[0],  b0);
-    _mm256_storeu_si256((__m256i *)&b[8],  b1);
-    _mm256_storeu_si256((__m256i *)&b[16], b2);
-    _mm256_storeu_si256((__m256i *)&b[24], b3);
+    _mm256_stream_si256((__m256i *)&b[0],  b0);
+    _mm256_stream_si256((__m256i *)&b[8],  b1);
+    _mm256_stream_si256((__m256i *)&b[16], b2);
+    _mm256_stream_si256((__m256i *)&b[24], b3);
 }
 #endif
 
 
-int main()
+int main(int argc, char **argv)
 {
-    char ch;
-    printf("what do you want to do?\n1.Encrypt a file\n2.Decrypt a file\nenter your option's number:");
-    scanf("%s", &ch);
+    if (argc != 4) {
+        fprintf(stderr, "Usage: %s {encrypt|decrypt} <input_file> <key_file>\n", argv[0]);
+        return 1;
+    }
+
+    const char *mode_str = argv[1];
+    const char *infile = argv[2];
+    const char *keyfile = argv[3];
 
     _Alignas(MATRIX_ALIGN) uint32_t key_matrix[32];
 
     uint64_t bytes=0;
 
-    if (ch == '1') /* ENCRYPTION path */
+    if (strcmp(mode_str, "encrypt") == 0) /* ENCRYPTION path */
     {
-        char *file, *lockedfile, *keyfile;
+        char outfile[512];
+        snprintf(outfile, sizeof(outfile), "%s.locked", infile);
 
-        file       = "../../big.data\0";
-        keyfile    = "../../test.key\0";
-        lockedfile = "../../big.data.locked\0";
-
-        FILE *reader    = fopen(file,      "rb");
+        FILE *reader    = fopen(infile,    "rb");
         FILE *keyreader = fopen(keyfile,   "rb");
 
         if (reader == NULL) 
         {
-            printf("\nError in opening/finding the file %s", file);
+            printf("\nError in opening/finding the file %s", infile);
             return 1;
         }
         if (keyreader == NULL) 
@@ -523,7 +534,7 @@ int main()
 
         printf("ENCRYPTION STARTED...\n");
 
-        FILE *writer = fopen(lockedfile, "wb");
+        FILE *writer = fopen(outfile, "wb");
 
         fread(key_matrix, 128, 1, keyreader);
         fclose(keyreader);
@@ -546,7 +557,13 @@ int main()
         size_t bytes_read;
         while ((bytes_read = fread(batch_buf, 1, BATCH_SIZE, reader)) > 0)
         {
-            size_t num_blocks = bytes_read / 128;
+            size_t bytes_read_orig = bytes_read;
+
+            size_t padded = ((bytes_read + 127) / 128) * 128;
+            if (padded > bytes_read)
+                memset(batch_buf + bytes_read, 0, padded - bytes_read);
+
+            size_t num_blocks = padded / 128;
             size_t b = 0;
 
 #if HAVE_AVX2
@@ -568,20 +585,18 @@ int main()
                 UNROLL_8
                 for (int round = 0; round < 8; round++)
                 {
-                    UNROLL_16
-                    for (int index = 0; index < 32; index += 2)
+                    UNROLL_32
+                    for (int index = 0; index < 32; index++)
                     {
-                        state[index]   = rotate_left (state[index],   scalar_rot_amount[0][round][0][index]);
-                        state[index+1] = rotate_right(state[index+1], scalar_rot_amount[0][round][0][index + 1]);
+                        state[index] = rotate_right(state[index], scalar_rot_amount[0][round][0][index]);
                     }
                     state[31] ^= scalar_xor_key[0][round][0];
                     transpose_matrix(state);
 
-                    UNROLL_16
-                    for (int index = 0; index < 32; index += 2)
+                    UNROLL_32
+                    for (int index = 0; index < 32; index++)
                     {
-                        state[index]   = rotate_right(state[index],   scalar_rot_amount[0][round][1][index]);
-                        state[index+1] = rotate_left (state[index+1], scalar_rot_amount[0][round][1][index + 1]);
+                        state[index] = rotate_right(state[index], scalar_rot_amount[0][round][1][index]);
                     }
                     state[31] ^= scalar_xor_key[0][round][1];
                     transpose_matrix(state);
@@ -589,7 +604,10 @@ int main()
 #endif
             }
 
-            fwrite(batch_buf, 1, bytes_read, writer);
+#if HAVE_AVX2
+            _mm_sfence();
+#endif
+            fwrite(batch_buf, 1, bytes_read_orig, writer);
         }
 
         STOP_MEASURING(timer);
@@ -599,20 +617,17 @@ int main()
         fclose(writer);
         return 0;
     }
-    else if (ch == '2') /* DECRYPTION path */
+    else if (strcmp(mode_str, "decrypt") == 0) /* DECRYPTION path */
     {
-        char *lockedfile, *unlockedfile, *keyfile;
+        char outfile[512];
+        snprintf(outfile, sizeof(outfile), "%s.unlocked", infile);
 
-        lockedfile   = "../../big.data.locked\0";
-        keyfile      = "../../test.key\0";
-        unlockedfile = "../../unlocked_test.data\0";
-
-        FILE *reader    = fopen(lockedfile, "rb");
-        FILE *keyreader = fopen(keyfile,    "rb");
+        FILE *reader    = fopen(infile,    "rb");
+        FILE *keyreader = fopen(keyfile,   "rb");
 
         if (reader == NULL) 
         {
-            printf("\nError in opening/finding the file %s", lockedfile);
+            printf("\nError in opening/finding the file %s", infile);
             return 1;
         }
         if (keyreader == NULL) 
@@ -632,7 +647,7 @@ int main()
 
         printf("DECRYPTION STARTED....\n");
 
-        FILE *writer = fopen(unlockedfile, "wb");
+        FILE *writer = fopen(outfile, "wb");
 
         fread(key_matrix, 128, 1, keyreader);
         fclose(keyreader);
@@ -655,7 +670,13 @@ int main()
         size_t bytes_read;
         while ((bytes_read = fread(batch_buf, 1, BATCH_SIZE, reader)) > 0)
         {
-            size_t num_blocks = bytes_read / 128;
+            size_t bytes_read_orig = bytes_read;
+
+            size_t padded = ((bytes_read + 127) / 128) * 128;
+            if (padded > bytes_read)
+                memset(batch_buf + bytes_read, 0, padded - bytes_read);
+
+            size_t num_blocks = padded / 128;
             size_t b = 0;
 
 #if HAVE_AVX2
@@ -679,26 +700,27 @@ int main()
                 {
                     transpose_matrix(state);
                     state[31] ^= scalar_xor_key[1][round][0];
-                    UNROLL_16
-                    for (int index = 0; index < 32; index += 2)
+                    UNROLL_32
+                    for (int index = 0; index < 32; index++)
                     {
-                        state[index]   = rotate_left (state[index],   scalar_rot_amount[1][round][0][index]);
-                        state[index+1] = rotate_right(state[index+1], scalar_rot_amount[1][round][0][index + 1]);
+                        state[index] = rotate_right(state[index], scalar_rot_amount[1][round][0][index]);
                     }
 
                     transpose_matrix(state);
                     state[31] ^= scalar_xor_key[1][round][1];
-                    UNROLL_16
-                    for (int index = 0; index < 32; index += 2)
+                    UNROLL_32
+                    for (int index = 0; index < 32; index++)
                     {
-                        state[index]   = rotate_right(state[index],   scalar_rot_amount[1][round][1][index]);
-                        state[index+1] = rotate_left (state[index+1], scalar_rot_amount[1][round][1][index + 1]);
+                        state[index] = rotate_right(state[index], scalar_rot_amount[1][round][1][index]);
                     }
                 }
 #endif
             }
 
-            fwrite(batch_buf, 1, bytes_read, writer);
+#if HAVE_AVX2
+            _mm_sfence();
+#endif
+            fwrite(batch_buf, 1, bytes_read_orig, writer);
         }
 
         STOP_MEASURING(timer);
@@ -710,7 +732,7 @@ int main()
     }
     else
     {
-        printf("invalid input");
+        fprintf(stderr, "Invalid mode: %s. Use 'encrypt' or 'decrypt'.\n", mode_str);
         return 1;
     }
 }

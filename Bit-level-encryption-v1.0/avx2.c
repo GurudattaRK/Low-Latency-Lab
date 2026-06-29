@@ -141,24 +141,11 @@ FORCE_INLINE void transpose_matrix_avx2(uint32_t * __restrict__ m)
 }
 
 /*
- * Vectorized rotations for a full 32-element matrix held in four YMM regs.
- * Phase 0: even indices rotate left, odd indices rotate right.
- * Phase 1: even indices rotate right, odd indices rotate left.
- *
- * The amount vector holds (key + index + (index & 1)) & 31 for each element.
+ * Unified right-rotation for all lanes.
+ * All rotation amounts are now right-rotate amounts.
  */
-FORCE_INLINE __m256i rotate_avx2_phase0(__m256i x, __m256i amount)
+FORCE_INLINE __m256i rotate_all_right(__m256i x, __m256i amount)
 {
     __m256i comp = _mm256_sub_epi32(_mm256_set1_epi32(32), amount);
-    __m256i left  = _mm256_or_si256(_mm256_sllv_epi32(x, amount), _mm256_srlv_epi32(x, comp));
-    __m256i right = _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));
-    return _mm256_blend_epi32(left, right, 0xAA);
-}
-
-FORCE_INLINE __m256i rotate_avx2_phase1(__m256i x, __m256i amount)
-{
-    __m256i comp = _mm256_sub_epi32(_mm256_set1_epi32(32), amount);
-    __m256i left  = _mm256_or_si256(_mm256_sllv_epi32(x, amount), _mm256_srlv_epi32(x, comp));
-    __m256i right = _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));
-    return _mm256_blend_epi32(right, left, 0xAA);
+    return _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));
 }
