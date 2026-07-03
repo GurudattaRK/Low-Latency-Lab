@@ -18,12 +18,12 @@ ARCH       := -march=native -mtune=native
 # NOT define _GNU_SOURCE for glibc's feature-test macros. Without this,
 # clang fails with "call to undeclared function 'CPU_ZERO'" etc.
 BASE_CFLAGS := -std=gnu11 -D_GNU_SOURCE -pthread $(WARN) $(ARCH) -mavx2
-OPT_CFLAGS  := -Ofast -ffast-math -flto=full -fno-omit-frame-pointer -funroll-loops -fno-plt -fno-math-errno
+OPT_CFLAGS  := -Ofast -flto=full -fno-omit-frame-pointer -funroll-loops -fno-plt -fno-math-errno
 
 # Overridable from the command line / recursive `make` calls (used by the
 # `pgo` target below to build instrumented, then re-optimized, binaries).
 CFLAGS  ?= $(BASE_CFLAGS) $(OPT_CFLAGS)
-LDFLAGS ?= -flto -fuse-ld=lld -pthread
+LDFLAGS ?= -fuse-ld=lld -pthread
 LIBS    := -luring
 
 PGO_DIR         := .pgo
@@ -55,7 +55,7 @@ pgo:
 	@echo "==> PGO 1/4: instrumented build"
 	$(MAKE) clean
 	$(MAKE) all \
-		CFLAGS="$(BASE_CFLAGS) -Ofast -ffast-math -fprofile-generate -DPGO_INSTRUMENTED" \
+		CFLAGS="$(BASE_CFLAGS) -Ofast -fprofile-generate -DPGO_INSTRUMENTED" \
 		LDFLAGS="-fprofile-generate -fuse-ld=lld -pthread"
 	mv $(TARGET) $(TARGET)_instrumented
 	@echo "==> PGO 2/4: training runs"
