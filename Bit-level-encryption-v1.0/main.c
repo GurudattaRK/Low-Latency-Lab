@@ -172,6 +172,7 @@ static uint32_t scalar_xor_key[2][8][2];
 
 #if HAVE_AVX2
     static __m256i avx2_rot_amount[2][8][2][4];
+    static __m256i avx2_rot_comp[2][8][2][4];
     static __m256i avx2_xor_vec[2][8][2];
 #endif
 
@@ -274,6 +275,16 @@ static void precompute_key_tables(const uint32_t *key_matrix)
                 scalar_rot_amount[1][round][1][base + 0]);
         }
 
+        UNROLL_4
+        for (int ymm = 0; ymm < 4; ymm++)
+        {
+            __m256i thirty_two = _mm256_set1_epi32(32);
+            avx2_rot_comp[0][round][0][ymm] = _mm256_sub_epi32(thirty_two, avx2_rot_amount[0][round][0][ymm]);
+            avx2_rot_comp[0][round][1][ymm] = _mm256_sub_epi32(thirty_two, avx2_rot_amount[0][round][1][ymm]);
+            avx2_rot_comp[1][round][0][ymm] = _mm256_sub_epi32(thirty_two, avx2_rot_amount[1][round][0][ymm]);
+            avx2_rot_comp[1][round][1][ymm] = _mm256_sub_epi32(thirty_two, avx2_rot_amount[1][round][1][ymm]);
+        }
+
         /* XOR vector has the key in element 7 (state index 31) only. */
         avx2_xor_vec[0][round][0] = _mm256_set_epi32(ke_xor0, 0, 0, 0, 0, 0, 0, 0);
         avx2_xor_vec[0][round][1] = _mm256_set_epi32(ke_xor1, 0, 0, 0, 0, 0, 0, 0);
@@ -290,35 +301,36 @@ static void precompute_key_tables(const uint32_t *key_matrix)
  */
 FORCE_INLINE void encrypt_block_avx2(uint32_t *state,
                                        const __m256i amounts[8][2][4],
+                                       const __m256i comp[8][2][4],
                                        const __m256i xor_vec[8][2])
 {
-    __m256i r0 = _mm256_loadu_si256((__m256i *)&state[0]);
-    __m256i r1 = _mm256_loadu_si256((__m256i *)&state[8]);
-    __m256i r2 = _mm256_loadu_si256((__m256i *)&state[16]);
-    __m256i r3 = _mm256_loadu_si256((__m256i *)&state[24]);
+    __m256i r0 = _mm256_load_si256((__m256i *)&state[0]);
+    __m256i r1 = _mm256_load_si256((__m256i *)&state[8]);
+    __m256i r2 = _mm256_load_si256((__m256i *)&state[16]);
+    __m256i r3 = _mm256_load_si256((__m256i *)&state[24]);
 
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
-        r0 = rotate_all_right(r0, amounts[round][0][0]);
-        r1 = rotate_all_right(r1, amounts[round][0][1]);
-        r2 = rotate_all_right(r2, amounts[round][0][2]);
-        r3 = rotate_all_right(r3, amounts[round][0][3]);
+        r0 = rotate_all_right(r0, amounts[round][0][0], comp[round][0][0]);
+        r1 = rotate_all_right(r1, amounts[round][0][1], comp[round][0][1]);
+        r2 = rotate_all_right(r2, amounts[round][0][2], comp[round][0][2]);
+        r3 = rotate_all_right(r3, amounts[round][0][3], comp[round][0][3]);
         r3 = _mm256_xor_si256(r3, xor_vec[round][0]);
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
 
-        r0 = rotate_all_right(r0, amounts[round][1][0]);
-        r1 = rotate_all_right(r1, amounts[round][1][1]);
-        r2 = rotate_all_right(r2, amounts[round][1][2]);
-        r3 = rotate_all_right(r3, amounts[round][1][3]);
+        r0 = rotate_all_right(r0, amounts[round][1][0], comp[round][1][0]);
+        r1 = rotate_all_right(r1, amounts[round][1][1], comp[round][1][1]);
+        r2 = rotate_all_right(r2, amounts[round][1][2], comp[round][1][2]);
+        r3 = rotate_all_right(r3, amounts[round][1][3], comp[round][1][3]);
         r3 = _mm256_xor_si256(r3, xor_vec[round][1]);
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
     }
 
-    _mm256_stream_si256((__m256i *)&state[0],  r0);
-    _mm256_stream_si256((__m256i *)&state[8],  r1);
-    _mm256_stream_si256((__m256i *)&state[16], r2);
-    _mm256_stream_si256((__m256i *)&state[24], r3);
+    _mm256_store_si256((__m256i *)&state[0],  r0);
+    _mm256_store_si256((__m256i *)&state[8],  r1);
+    _mm256_store_si256((__m256i *)&state[16], r2);
+    _mm256_store_si256((__m256i *)&state[24], r3);
 }
 
 /*
@@ -326,35 +338,36 @@ FORCE_INLINE void encrypt_block_avx2(uint32_t *state,
  */
 FORCE_INLINE void decrypt_block_avx2(uint32_t *state,
                                        const __m256i amounts[8][2][4],
+                                       const __m256i comp[8][2][4],
                                        const __m256i xor_vec[8][2])
 {
-    __m256i r0 = _mm256_loadu_si256((__m256i *)&state[0]);
-    __m256i r1 = _mm256_loadu_si256((__m256i *)&state[8]);
-    __m256i r2 = _mm256_loadu_si256((__m256i *)&state[16]);
-    __m256i r3 = _mm256_loadu_si256((__m256i *)&state[24]);
+    __m256i r0 = _mm256_load_si256((__m256i *)&state[0]);
+    __m256i r1 = _mm256_load_si256((__m256i *)&state[8]);
+    __m256i r2 = _mm256_load_si256((__m256i *)&state[16]);
+    __m256i r3 = _mm256_load_si256((__m256i *)&state[24]);
 
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
         r3 = _mm256_xor_si256(r3, xor_vec[round][0]);
-        r0 = rotate_all_right(r0, amounts[round][0][0]);
-        r1 = rotate_all_right(r1, amounts[round][0][1]);
-        r2 = rotate_all_right(r2, amounts[round][0][2]);
-        r3 = rotate_all_right(r3, amounts[round][0][3]);
+        r0 = rotate_all_right(r0, amounts[round][0][0], comp[round][0][0]);
+        r1 = rotate_all_right(r1, amounts[round][0][1], comp[round][0][1]);
+        r2 = rotate_all_right(r2, amounts[round][0][2], comp[round][0][2]);
+        r3 = rotate_all_right(r3, amounts[round][0][3], comp[round][0][3]);
 
         transpose_avx2_regs(&r0, &r1, &r2, &r3);
         r3 = _mm256_xor_si256(r3, xor_vec[round][1]);
-        r0 = rotate_all_right(r0, amounts[round][1][0]);
-        r1 = rotate_all_right(r1, amounts[round][1][1]);
-        r2 = rotate_all_right(r2, amounts[round][1][2]);
-        r3 = rotate_all_right(r3, amounts[round][1][3]);
+        r0 = rotate_all_right(r0, amounts[round][1][0], comp[round][1][0]);
+        r1 = rotate_all_right(r1, amounts[round][1][1], comp[round][1][1]);
+        r2 = rotate_all_right(r2, amounts[round][1][2], comp[round][1][2]);
+        r3 = rotate_all_right(r3, amounts[round][1][3], comp[round][1][3]);
     }
 
-    _mm256_stream_si256((__m256i *)&state[0],  r0);
-    _mm256_stream_si256((__m256i *)&state[8],  r1);
-    _mm256_stream_si256((__m256i *)&state[16], r2);
-    _mm256_stream_si256((__m256i *)&state[24], r3);
+    _mm256_store_si256((__m256i *)&state[0],  r0);
+    _mm256_store_si256((__m256i *)&state[8],  r1);
+    _mm256_store_si256((__m256i *)&state[16], r2);
+    _mm256_store_si256((__m256i *)&state[24], r3);
 }
 
 /*
@@ -364,30 +377,31 @@ FORCE_INLINE void decrypt_block_avx2(uint32_t *state,
  */
 FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
                                           const __m256i amounts[8][2][4],
+                                          const __m256i comp[8][2][4],
                                           const __m256i xor_vec[8][2])
 {
-    __m256i a0 = _mm256_loadu_si256((__m256i *)&a[0]);
-    __m256i a1 = _mm256_loadu_si256((__m256i *)&a[8]);
-    __m256i a2 = _mm256_loadu_si256((__m256i *)&a[16]);
-    __m256i a3 = _mm256_loadu_si256((__m256i *)&a[24]);
+    __m256i a0 = _mm256_load_si256((__m256i *)&a[0]);
+    __m256i a1 = _mm256_load_si256((__m256i *)&a[8]);
+    __m256i a2 = _mm256_load_si256((__m256i *)&a[16]);
+    __m256i a3 = _mm256_load_si256((__m256i *)&a[24]);
 
-    __m256i b0 = _mm256_loadu_si256((__m256i *)&b[0]);
-    __m256i b1 = _mm256_loadu_si256((__m256i *)&b[8]);
-    __m256i b2 = _mm256_loadu_si256((__m256i *)&b[16]);
-    __m256i b3 = _mm256_loadu_si256((__m256i *)&b[24]);
+    __m256i b0 = _mm256_load_si256((__m256i *)&b[0]);
+    __m256i b1 = _mm256_load_si256((__m256i *)&b[8]);
+    __m256i b2 = _mm256_load_si256((__m256i *)&b[16]);
+    __m256i b3 = _mm256_load_si256((__m256i *)&b[24]);
 
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
-        a0 = rotate_all_right(a0, amounts[round][0][0]);
-        a1 = rotate_all_right(a1, amounts[round][0][1]);
-        a2 = rotate_all_right(a2, amounts[round][0][2]);
-        a3 = rotate_all_right(a3, amounts[round][0][3]);
+        a0 = rotate_all_right(a0, amounts[round][0][0], comp[round][0][0]);
+        a1 = rotate_all_right(a1, amounts[round][0][1], comp[round][0][1]);
+        a2 = rotate_all_right(a2, amounts[round][0][2], comp[round][0][2]);
+        a3 = rotate_all_right(a3, amounts[round][0][3], comp[round][0][3]);
 
-        b0 = rotate_all_right(b0, amounts[round][0][0]);
-        b1 = rotate_all_right(b1, amounts[round][0][1]);
-        b2 = rotate_all_right(b2, amounts[round][0][2]);
-        b3 = rotate_all_right(b3, amounts[round][0][3]);
+        b0 = rotate_all_right(b0, amounts[round][0][0], comp[round][0][0]);
+        b1 = rotate_all_right(b1, amounts[round][0][1], comp[round][0][1]);
+        b2 = rotate_all_right(b2, amounts[round][0][2], comp[round][0][2]);
+        b3 = rotate_all_right(b3, amounts[round][0][3], comp[round][0][3]);
 
         a3 = _mm256_xor_si256(a3, xor_vec[round][0]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][0]);
@@ -395,15 +409,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
 
-        a0 = rotate_all_right(a0, amounts[round][1][0]);
-        a1 = rotate_all_right(a1, amounts[round][1][1]);
-        a2 = rotate_all_right(a2, amounts[round][1][2]);
-        a3 = rotate_all_right(a3, amounts[round][1][3]);
+        a0 = rotate_all_right(a0, amounts[round][1][0], comp[round][1][0]);
+        a1 = rotate_all_right(a1, amounts[round][1][1], comp[round][1][1]);
+        a2 = rotate_all_right(a2, amounts[round][1][2], comp[round][1][2]);
+        a3 = rotate_all_right(a3, amounts[round][1][3], comp[round][1][3]);
 
-        b0 = rotate_all_right(b0, amounts[round][1][0]);
-        b1 = rotate_all_right(b1, amounts[round][1][1]);
-        b2 = rotate_all_right(b2, amounts[round][1][2]);
-        b3 = rotate_all_right(b3, amounts[round][1][3]);
+        b0 = rotate_all_right(b0, amounts[round][1][0], comp[round][1][0]);
+        b1 = rotate_all_right(b1, amounts[round][1][1], comp[round][1][1]);
+        b2 = rotate_all_right(b2, amounts[round][1][2], comp[round][1][2]);
+        b3 = rotate_all_right(b3, amounts[round][1][3], comp[round][1][3]);
 
         a3 = _mm256_xor_si256(a3, xor_vec[round][1]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][1]);
@@ -412,15 +426,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
     }
 
-    _mm256_stream_si256((__m256i *)&a[0],  a0);
-    _mm256_stream_si256((__m256i *)&a[8],  a1);
-    _mm256_stream_si256((__m256i *)&a[16], a2);
-    _mm256_stream_si256((__m256i *)&a[24], a3);
+    _mm256_store_si256((__m256i *)&a[0],  a0);
+    _mm256_store_si256((__m256i *)&a[8],  a1);
+    _mm256_store_si256((__m256i *)&a[16], a2);
+    _mm256_store_si256((__m256i *)&a[24], a3);
 
-    _mm256_stream_si256((__m256i *)&b[0],  b0);
-    _mm256_stream_si256((__m256i *)&b[8],  b1);
-    _mm256_stream_si256((__m256i *)&b[16], b2);
-    _mm256_stream_si256((__m256i *)&b[24], b3);
+    _mm256_store_si256((__m256i *)&b[0],  b0);
+    _mm256_store_si256((__m256i *)&b[8],  b1);
+    _mm256_store_si256((__m256i *)&b[16], b2);
+    _mm256_store_si256((__m256i *)&b[24], b3);
 }
 
 /*
@@ -428,17 +442,18 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
  */
 FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
                                           const __m256i amounts[8][2][4],
+                                          const __m256i comp[8][2][4],
                                           const __m256i xor_vec[8][2])
 {
-    __m256i a0 = _mm256_loadu_si256((__m256i *)&a[0]);
-    __m256i a1 = _mm256_loadu_si256((__m256i *)&a[8]);
-    __m256i a2 = _mm256_loadu_si256((__m256i *)&a[16]);
-    __m256i a3 = _mm256_loadu_si256((__m256i *)&a[24]);
+    __m256i a0 = _mm256_load_si256((__m256i *)&a[0]);
+    __m256i a1 = _mm256_load_si256((__m256i *)&a[8]);
+    __m256i a2 = _mm256_load_si256((__m256i *)&a[16]);
+    __m256i a3 = _mm256_load_si256((__m256i *)&a[24]);
 
-    __m256i b0 = _mm256_loadu_si256((__m256i *)&b[0]);
-    __m256i b1 = _mm256_loadu_si256((__m256i *)&b[8]);
-    __m256i b2 = _mm256_loadu_si256((__m256i *)&b[16]);
-    __m256i b3 = _mm256_loadu_si256((__m256i *)&b[24]);
+    __m256i b0 = _mm256_load_si256((__m256i *)&b[0]);
+    __m256i b1 = _mm256_load_si256((__m256i *)&b[8]);
+    __m256i b2 = _mm256_load_si256((__m256i *)&b[16]);
+    __m256i b3 = _mm256_load_si256((__m256i *)&b[24]);
 
     UNROLL_8
     for (int round = 0; round < 8; round++)
@@ -449,15 +464,15 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         a3 = _mm256_xor_si256(a3, xor_vec[round][0]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][0]);
 
-        a0 = rotate_all_right(a0, amounts[round][0][0]);
-        a1 = rotate_all_right(a1, amounts[round][0][1]);
-        a2 = rotate_all_right(a2, amounts[round][0][2]);
-        a3 = rotate_all_right(a3, amounts[round][0][3]);
+        a0 = rotate_all_right(a0, amounts[round][0][0], comp[round][0][0]);
+        a1 = rotate_all_right(a1, amounts[round][0][1], comp[round][0][1]);
+        a2 = rotate_all_right(a2, amounts[round][0][2], comp[round][0][2]);
+        a3 = rotate_all_right(a3, amounts[round][0][3], comp[round][0][3]);
 
-        b0 = rotate_all_right(b0, amounts[round][0][0]);
-        b1 = rotate_all_right(b1, amounts[round][0][1]);
-        b2 = rotate_all_right(b2, amounts[round][0][2]);
-        b3 = rotate_all_right(b3, amounts[round][0][3]);
+        b0 = rotate_all_right(b0, amounts[round][0][0], comp[round][0][0]);
+        b1 = rotate_all_right(b1, amounts[round][0][1], comp[round][0][1]);
+        b2 = rotate_all_right(b2, amounts[round][0][2], comp[round][0][2]);
+        b3 = rotate_all_right(b3, amounts[round][0][3], comp[round][0][3]);
 
         transpose_avx2_regs(&a0, &a1, &a2, &a3);
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
@@ -465,26 +480,26 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         a3 = _mm256_xor_si256(a3, xor_vec[round][1]);
         b3 = _mm256_xor_si256(b3, xor_vec[round][1]);
 
-        a0 = rotate_all_right(a0, amounts[round][1][0]);
-        a1 = rotate_all_right(a1, amounts[round][1][1]);
-        a2 = rotate_all_right(a2, amounts[round][1][2]);
-        a3 = rotate_all_right(a3, amounts[round][1][3]);
+        a0 = rotate_all_right(a0, amounts[round][1][0], comp[round][1][0]);
+        a1 = rotate_all_right(a1, amounts[round][1][1], comp[round][1][1]);
+        a2 = rotate_all_right(a2, amounts[round][1][2], comp[round][1][2]);
+        a3 = rotate_all_right(a3, amounts[round][1][3], comp[round][1][3]);
 
-        b0 = rotate_all_right(b0, amounts[round][1][0]);
-        b1 = rotate_all_right(b1, amounts[round][1][1]);
-        b2 = rotate_all_right(b2, amounts[round][1][2]);
-        b3 = rotate_all_right(b3, amounts[round][1][3]);
+        b0 = rotate_all_right(b0, amounts[round][1][0], comp[round][1][0]);
+        b1 = rotate_all_right(b1, amounts[round][1][1], comp[round][1][1]);
+        b2 = rotate_all_right(b2, amounts[round][1][2], comp[round][1][2]);
+        b3 = rotate_all_right(b3, amounts[round][1][3], comp[round][1][3]);
     }
 
-    _mm256_stream_si256((__m256i *)&a[0],  a0);
-    _mm256_stream_si256((__m256i *)&a[8],  a1);
-    _mm256_stream_si256((__m256i *)&a[16], a2);
-    _mm256_stream_si256((__m256i *)&a[24], a3);
+    _mm256_store_si256((__m256i *)&a[0],  a0);
+    _mm256_store_si256((__m256i *)&a[8],  a1);
+    _mm256_store_si256((__m256i *)&a[16], a2);
+    _mm256_store_si256((__m256i *)&a[24], a3);
 
-    _mm256_stream_si256((__m256i *)&b[0],  b0);
-    _mm256_stream_si256((__m256i *)&b[8],  b1);
-    _mm256_stream_si256((__m256i *)&b[16], b2);
-    _mm256_stream_si256((__m256i *)&b[24], b3);
+    _mm256_store_si256((__m256i *)&b[0],  b0);
+    _mm256_store_si256((__m256i *)&b[8],  b1);
+    _mm256_store_si256((__m256i *)&b[16], b2);
+    _mm256_store_si256((__m256i *)&b[24], b3);
 }
 #endif
 
@@ -570,7 +585,7 @@ int main(int argc, char **argv)
             {
                 uint32_t *a = (uint32_t *)(batch_buf + b * 128);
                 uint32_t *bb = (uint32_t *)(batch_buf + (b + 1) * 128);
-                encrypt_two_blocks_avx2(a, bb, avx2_rot_amount[0], avx2_xor_vec[0]);
+                encrypt_two_blocks_avx2(a, bb, avx2_rot_amount[0], avx2_rot_comp[0], avx2_xor_vec[0]);
             }
 #endif
 
@@ -579,7 +594,7 @@ int main(int argc, char **argv)
                 uint32_t *state = (uint32_t *)(batch_buf + b * 128);
 
 #if HAVE_AVX2
-                encrypt_block_avx2(state, avx2_rot_amount[0], avx2_xor_vec[0]);
+                encrypt_block_avx2(state, avx2_rot_amount[0], avx2_rot_comp[0], avx2_xor_vec[0]);
 #else
                 UNROLL_8
                 for (int round = 0; round < 8; round++)
@@ -603,9 +618,6 @@ int main(int argc, char **argv)
 #endif
             }
 
-#if HAVE_AVX2
-            _mm_sfence();
-#endif
                 // Write full padded size so encrypted file is always a multiple of 128 bytes
                 fwrite(batch_buf, 1, padded, writer);
         }
@@ -684,7 +696,7 @@ int main(int argc, char **argv)
             {
                 uint32_t *a = (uint32_t *)(batch_buf + b * 128);
                 uint32_t *bb = (uint32_t *)(batch_buf + (b + 1) * 128);
-                decrypt_two_blocks_avx2(a, bb, avx2_rot_amount[1], avx2_xor_vec[1]);
+                decrypt_two_blocks_avx2(a, bb, avx2_rot_amount[1], avx2_rot_comp[1], avx2_xor_vec[1]);
             }
 #endif
 
@@ -693,7 +705,7 @@ int main(int argc, char **argv)
                 uint32_t *state = (uint32_t *)(batch_buf + b * 128);
 
 #if HAVE_AVX2
-                decrypt_block_avx2(state, avx2_rot_amount[1], avx2_xor_vec[1]);
+                decrypt_block_avx2(state, avx2_rot_amount[1], avx2_rot_comp[1], avx2_xor_vec[1]);
 #else
                 UNROLL_8
                 for (int round = 0; round < 8; round++)
@@ -717,9 +729,6 @@ int main(int argc, char **argv)
 #endif
             }
 
-#if HAVE_AVX2
-            _mm_sfence();
-#endif
             fwrite(batch_buf, 1, bytes_read_orig, writer);
         }
 

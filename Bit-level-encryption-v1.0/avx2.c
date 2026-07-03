@@ -127,25 +127,24 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
  */
 FORCE_INLINE void transpose_matrix_avx2(uint32_t * __restrict__ m)
 {
-    __m256i r0 = _mm256_loadu_si256((__m256i*)&m[0]);
-    __m256i r1 = _mm256_loadu_si256((__m256i*)&m[8]);
-    __m256i r2 = _mm256_loadu_si256((__m256i*)&m[16]);
-    __m256i r3 = _mm256_loadu_si256((__m256i*)&m[24]);
+    __m256i r0 = _mm256_load_si256((__m256i*)&m[0]);
+    __m256i r1 = _mm256_load_si256((__m256i*)&m[8]);
+    __m256i r2 = _mm256_load_si256((__m256i*)&m[16]);
+    __m256i r3 = _mm256_load_si256((__m256i*)&m[24]);
 
     transpose_avx2_regs(&r0, &r1, &r2, &r3);
 
-    _mm256_storeu_si256((__m256i*)&m[0],  r0);
-    _mm256_storeu_si256((__m256i*)&m[8],  r1);
-    _mm256_storeu_si256((__m256i*)&m[16], r2);
-    _mm256_storeu_si256((__m256i*)&m[24], r3);
+    _mm256_store_si256((__m256i*)&m[0],  r0);
+    _mm256_store_si256((__m256i*)&m[8],  r1);
+    _mm256_store_si256((__m256i*)&m[16], r2);
+    _mm256_store_si256((__m256i*)&m[24], r3);
 }
 
 /*
  * Unified right-rotation for all lanes.
  * All rotation amounts are now right-rotate amounts.
  */
-FORCE_INLINE __m256i rotate_all_right(__m256i x, __m256i amount)
+FORCE_INLINE __m256i rotate_all_right(__m256i x, __m256i amount, __m256i comp)
 {
-    __m256i comp = _mm256_sub_epi32(_mm256_set1_epi32(32), amount);
     return _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));
 }
