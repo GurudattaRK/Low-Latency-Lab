@@ -127,10 +127,13 @@ __attribute__((always_inline)) static inline int get_core_count(void) {
 
 __attribute__((always_inline)) static inline int get_nth_online_cpu(int n)
 {
-    static int online_cpus[1024];
-    static int num_online = 0;
+    static int phys_cpus[1024];
+    static int num_phys = 0;
     static int initialized = 0;
     if (!initialized) {
+        int seen_core_ids[1024];
+        int num_seen = 0;
+
         FILE* fp = fopen("/sys/devices/system/cpu/online", "r");
         if (fp) {
             char buf[256];
@@ -139,10 +142,43 @@ __attribute__((always_inline)) static inline int get_nth_online_cpu(int n)
                 while (*p) {
                     int start = -1, end = -1;
                     if (sscanf(p, "%d-%d", &start, &end) == 2 && start >= 0 && end >= start) {
-                        for (int i = start; i <= end && num_online < 1024; i++)
-                            online_cpus[num_online++] = i;
-                    } else if (sscanf(p, "%d", &start) == 1 && start >= 0 && num_online < 1024) {
-                        online_cpus[num_online++] = start;
+                        for (int i = start; i <= end; i++) {
+                            char path[256];
+                            snprintf(path, sizeof(path),
+                                "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
+                            FILE* cf = fopen(path, "r");
+                            if (cf) {
+                                int cid;
+                                if (fscanf(cf, "%d", &cid) == 1) {
+                                    int found = 0;
+                                    for (int j = 0; j < num_seen; j++)
+                                        if (seen_core_ids[j] == cid) { found = 1; break; }
+                                    if (!found && num_phys < 1024) {
+                                        seen_core_ids[num_seen++] = cid;
+                                        phys_cpus[num_phys++] = i;
+                                    }
+                                }
+                                fclose(cf);
+                            }
+                        }
+                    } else if (sscanf(p, "%d", &start) == 1 && start >= 0) {
+                        char path[256];
+                        snprintf(path, sizeof(path),
+                            "/sys/devices/system/cpu/cpu%d/topology/core_id", start);
+                        FILE* cf = fopen(path, "r");
+                        if (cf) {
+                            int cid;
+                            if (fscanf(cf, "%d", &cid) == 1) {
+                                int found = 0;
+                                for (int j = 0; j < num_seen; j++)
+                                    if (seen_core_ids[j] == cid) { found = 1; break; }
+                                if (!found && num_phys < 1024) {
+                                    seen_core_ids[num_seen++] = cid;
+                                    phys_cpus[num_phys++] = start;
+                                }
+                            }
+                            fclose(cf);
+                        }
                     }
                     while (*p && *p != ',') p++;
                     if (*p == ',') p++;
@@ -150,11 +186,11 @@ __attribute__((always_inline)) static inline int get_nth_online_cpu(int n)
             }
             fclose(fp);
         }
+        if (num_phys == 0) phys_cpus[num_phys++] = 0;
         initialized = 1;
     }
-    if (num_online == 0) return n;
-    if (n < 0 || n >= num_online) return online_cpus[n % num_online];
-    return online_cpus[n];
+    if (n < 0 || n >= num_phys) return phys_cpus[n % num_phys];
+    return phys_cpus[n];
 }
 
 __attribute__((always_inline)) static inline void pin_to_core(int core_id) {
@@ -344,6 +380,7 @@ __attribute__((always_inline)) static inline void worker_process(WorkerCtx* w)
             ChunkSlot* s = &w->slots[slot_idx];
             atomic_store_explicit(&s->state, SLOT_PROCESSING, memory_order_relaxed);
             process_region(s->buf, s->padded_size, w->mode, w->key_tables);
+            _mm_sfence();
             atomic_store_explicit(&s->state, SLOT_WRITE_READY, memory_order_relaxed);
             while (!mpmc_queue_push(w->write_queue, slot_idx)) {}
         } else {

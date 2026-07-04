@@ -14,7 +14,7 @@ WARN       := -Wall -Wextra
 ARCH       := -march=native -mtune=native
 # _GNU_SOURCE for CPU_ZERO/CPU_SET etc.
 BASE_CFLAGS := -std=gnu11 -D_GNU_SOURCE -pthread $(WARN) $(ARCH) -mavx2
-OPT_CFLAGS  := -Ofast -flto=full -fno-omit-frame-pointer -funroll-loops -fno-plt -fno-math-errno
+OPT_CFLAGS  := -Ofast -flto=full -fno-omit-frame-pointer -fno-plt -fno-math-errno
 
 # Overridable (used by pgo target)
 CFLAGS  ?= $(BASE_CFLAGS) $(OPT_CFLAGS)

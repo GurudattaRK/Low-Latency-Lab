@@ -343,15 +343,15 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
     }
 
-    _mm256_store_si256((__m256i *)&a[0],  a0);
-    _mm256_store_si256((__m256i *)&a[8],  a1);
-    _mm256_store_si256((__m256i *)&a[16], a2);
-    _mm256_store_si256((__m256i *)&a[24], a3);
+    _mm256_stream_si256((__m256i *)&a[0],  a0);
+    _mm256_stream_si256((__m256i *)&a[8],  a1);
+    _mm256_stream_si256((__m256i *)&a[16], a2);
+    _mm256_stream_si256((__m256i *)&a[24], a3);
 
-    _mm256_store_si256((__m256i *)&b[0],  b0);
-    _mm256_store_si256((__m256i *)&b[8],  b1);
-    _mm256_store_si256((__m256i *)&b[16], b2);
-    _mm256_store_si256((__m256i *)&b[24], b3);
+    _mm256_stream_si256((__m256i *)&b[0],  b0);
+    _mm256_stream_si256((__m256i *)&b[8],  b1);
+    _mm256_stream_si256((__m256i *)&b[16], b2);
+    _mm256_stream_si256((__m256i *)&b[24], b3);
 }
 
 FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
@@ -405,15 +405,15 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         b3 = rotate_all_right(b3, amounts[round][1][3], comp[round][1][3]);
     }
 
-    _mm256_store_si256((__m256i *)&a[0],  a0);
-    _mm256_store_si256((__m256i *)&a[8],  a1);
-    _mm256_store_si256((__m256i *)&a[16], a2);
-    _mm256_store_si256((__m256i *)&a[24], a3);
+    _mm256_stream_si256((__m256i *)&a[0],  a0);
+    _mm256_stream_si256((__m256i *)&a[8],  a1);
+    _mm256_stream_si256((__m256i *)&a[16], a2);
+    _mm256_stream_si256((__m256i *)&a[24], a3);
 
-    _mm256_store_si256((__m256i *)&b[0],  b0);
-    _mm256_store_si256((__m256i *)&b[8],  b1);
-    _mm256_store_si256((__m256i *)&b[16], b2);
-    _mm256_store_si256((__m256i *)&b[24], b3);
+    _mm256_stream_si256((__m256i *)&b[0],  b0);
+    _mm256_stream_si256((__m256i *)&b[8],  b1);
+    _mm256_stream_si256((__m256i *)&b[16], b2);
+    _mm256_stream_si256((__m256i *)&b[24], b3);
 }
 
 /* scalar encrypt/decrypt single block */

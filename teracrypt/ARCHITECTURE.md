@@ -7,20 +7,20 @@ Multi-process async encryption pipeline using io_uring, lock-free queues, and AV
 TeraCrypt encrypts/decrypts files in 8 MiB chunks. A parent process manages I/O via io_uring while N worker processes (one per remaining physical core) handle the crypto. Workers communicate with the parent through lock-free MPMC queues in shared memory.
 
 ```
-                          ┌─────────────────────────────────────────────────┐
-                          │              PARENT (core 0)                    │
-                          │                                                 │
-                          │   ┌─────────┐    ┌──────────┐   ┌─────────┐   │
-                          │   │ io_uring│───▶│ CQE loop │──▶│ free_list│  │
-                          │   │ SQ ring │    │ (reap    │   │ (recycle│   │
-                          │   │ (submit │    │  complet-│   │  slots) │   │
-                          │   │  reads/ │    │  ions)   │   └────┬────┘   │
-                          │   │  writes)│    └────┬─────┘        │        │
-                          │   └────┬────┘         │              │        │
-                          │        │              │              │        │
+                          ┌──────────────────────────────────────────────┐
+                          │              PARENT (core 0)                 │
+                          │                                              │
+                          │   ┌─────────┐    ┌──────────┐   ┌─────────┐  │
+                          │   │ io_uring│───▶│ CQE loop │──▶│free_list│  │
+                          │   │ SQ ring │    │ (reap    │   │ (recycle│  │
+                          │   │ (submit │    │  complet-│   │  slots) │  │
+                          │   │  reads/ │    │  ions)   │   └────┬────┘  │
+                          │   │  writes)│    └────┬─────┘        │       │
+                          │   └────┬────┘         │              │       │
+                          │        │              │              │       │
                           │   submit reads   push to         pop free    │
                           │   (SQEs)         read_queue       slot for   │
-                          │                                       new read │
+                          │                                     new read │
                           └────────┬─────────────┬────────────────┬──────┘
                                    │             │                │
                               ┌────▼────┐   ┌────▼─────┐     ┌────▼─────┐
@@ -29,11 +29,11 @@ TeraCrypt encrypts/decrypts files in 8 MiB chunks. A parent process manages I/O 
                               │ (MPMC)  │   │ (MPMC)   │     │ (shared  │
                               └────┬────┘   └────▲─────┘     │  mmap)   │
                                    │             │           └──────────┘
-                          ┌────────┴─────────────┴────────────────┐
-                          │           WORKER PROCESSES            │
-                          │     (pinned to cores 1..N-1)          │
+                          ┌────────┴─────────────┴───────────────┐
+                          │           WORKER PROCESSES           │
+                          │     (pinned to cores 1..N-1)         │
                           │                                      │
-                          │   pop from read_queue                 │
+                          │   pop from read_queue                │
                           │        │                             │
                           │        ▼                             │
                           │   process_region()                   │
@@ -114,21 +114,21 @@ If the file size isn't a multiple of 8 MiB, the ragged tail is handled inline by
 
 ```
 ┌─────────────────────────────────────────────┐
-│ PARENT: io_uring_prep_read(tail_buf, ...)    │
-│         user_data = OP_TAIL_READ             │
+│ PARENT: io_uring_prep_read(tail_buf, ...)   │
+│         user_data = OP_TAIL_READ            │
 └──────────────────┬──────────────────────────┘
                    │ CQE
                    ▼
 ┌─────────────────────────────────────────────┐
-│ PARENT: process_region(tail_buf, padded)     │
-│         (yes, parent does crypto here --     │
-│          it's just one small chunk)          │
+│ PARENT: process_region(tail_buf, padded)    │
+│         (yes, parent does crypto here --    │
+│          it's just one small chunk)         │
 └──────────────────┬──────────────────────────┘
                    │
                    ▼
 ┌─────────────────────────────────────────────┐
-│ PARENT: io_uring_prep_write(tail_buf, ...)   │
-│         user_data = OP_TAIL_WRITE            │
+│ PARENT: io_uring_prep_write(tail_buf, ...)  │
+│         user_data = OP_TAIL_WRITE           │
 └──────────────────┬──────────────────────────┘
                    │ CQE
                    ▼
@@ -154,8 +154,8 @@ All inter-process state lives in anonymous shared memory (MAP_SHARED | MAP_ANONY
 │  ┌─────────────────┐  ┌──────────────────────────────────┐  │
 │  │ KeyTables       │  │ ChunkSlot[total_slots]           │  │
 │  │ (precomputed    │  │  - each cache-line aligned       │  │
-│  │  from 128-byte  │  │  - buf ptr, offset, sizes,      │  │
-│  │  key file)      │  │    atomic state, padding        │  │
+│  │  from 128-byte  │  │  - buf ptr, offset, sizes,       │  │
+│  │  key file)      │  │    atomic state, padding         │  │
 │  └─────────────────┘  └──────────────────────────────────┘  │
 │                                                             │
 │  ┌─────────────────┐  ┌──────────────────────────────────┐  │
@@ -166,11 +166,11 @@ All inter-process state lives in anonymous shared memory (MAP_SHARED | MAP_ANONY
 │  │ MADV_HUGEPAGE   │                                        │
 │  └─────────────────┘                                        │
 │                                                             │
-│  ┌─────────────────┐  ┌─────────────────┐                  │
-│  │ read_queue      │  │ write_queue     │                  │
-│  │ (mpmc_queue_t   │  │ (mpmc_queue_t   │                  │
-│  │  + cells)       │  │  + cells)       │                  │
-│  └─────────────────┘  └─────────────────┘                  │
+│  ┌─────────────────┐  ┌─────────────────┐                   │
+│  │ read_queue      │  │ write_queue     │                   │
+│  │ (mpmc_queue_t   │  │ (mpmc_queue_t   │                   │
+│  │  + cells)       │  │  + cells)       │                   │
+│  └─────────────────┘  └─────────────────┘                   │
 └─────────────────────────────────────────────────────────────┘
 
 total_slots = num_workers + MAX_INFLIGHT_READS + MAX_INFLIGHT_WRITES
@@ -274,7 +274,7 @@ Index meaning: [encrypt/decrypt][round][phase][lane]
 │   writes: bypass page cache, aligned to 4096        │
 │   → no kernel copy, no cache pollution              │
 │   → posix_fadvise(DONTNEED) skipped (nothing to     │
-│     evict)                                           │
+│     evict)                                          │
 ├─────────────────────────────────────────────────────┤
 │ Buffered (fallback)                                 │
 │   → O_DIRECT not supported (tmpfs, network FS)      │
