@@ -31,7 +31,7 @@ struct KeyTables {
     __m256i avx2_xor_vec[2][8][2];
 };
 
-/* ---- AVX2 primitives (from avx2.c) ---- */
+/* AVX2 primitives */
 
 FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m256i *r3)
 {
@@ -128,7 +128,7 @@ FORCE_INLINE __m256i rotate_all_right(__m256i x, __m256i amount, __m256i comp)
     return _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));
 }
 
-/* ---- scalar transpose ---- */
+/* scalar transpose */
 
 FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
 {
@@ -183,7 +183,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
     }
 }
 
-/* ---- key table precomputation ---- */
+/* key table precomputation */
 
 FORCE_INLINE void precompute_key_tables(const uint32_t key_matrix[32], struct KeyTables* tables)
 {
@@ -290,7 +290,7 @@ FORCE_INLINE void precompute_key_tables(const uint32_t key_matrix[32], struct Ke
     }
 }
 
-/* ---- AVX2 encrypt/decrypt two blocks ---- */
+/* AVX2 encrypt/decrypt two blocks in parallel for ILP */
 
 FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
                                           const __m256i amounts[8][2][4],
@@ -416,7 +416,7 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     _mm256_store_si256((__m256i *)&b[24], b3);
 }
 
-/* ---- scalar encrypt/decrypt single block ---- */
+/* scalar encrypt/decrypt single block */
 
 FORCE_INLINE void encrypt_block_scalar(uint32_t *state,
                                         const uint8_t rot_amt[8][2][32],
@@ -468,7 +468,7 @@ FORCE_INLINE void decrypt_block_scalar(uint32_t *state,
     }
 }
 
-/* ---- process_region: process 4 blocks at a time for maximum ILP ---- */
+/* process_region: two blocks at a time for max ILP, scalar fallback for odd block */
 
 FORCE_INLINE void process_region(uint8_t* data, size_t size, OperationMode mode,
                    const struct KeyTables* tables)

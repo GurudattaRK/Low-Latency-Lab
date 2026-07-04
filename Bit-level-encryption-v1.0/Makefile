@@ -1,21 +1,13 @@
-#
 # Cross-platform Makefile
+# GCC and Clang. Linux, macOS, Windows (MSYS2/MinGW).
+# x86_64, i386, aarch64, riscv64.
 #
-# Supported compilers: GCC and Clang.
-# Supported platforms: Linux, macOS, Windows (MSYS2/MinGW).
-# Supported architectures: x86_64, i386, aarch64, riscv64.
-#
-# Primary commands:
-#   make       - build the optimized binary for the current platform
-#   make pgo   - build with Profile-Guided Optimization
-#   make clean - remove build artifacts
-#   make info  - show detected platform, compiler, and flags
-#
+# make / make pgo / make clean / make info
 
 SRC    := main.c
 TARGET := main
 
-# Figure out the operating system.
+# Detect OS
 UNAME := $(shell uname -s)
 RM    := rm -f
 
@@ -29,20 +21,18 @@ else
     PLATFORM := linux
 endif
 
-# Figure out the CPU architecture.  macOS reports arm64, we normalize to aarch64.
+# Detect arch (normalize arm64 -> aarch64)
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),arm64)
     ARCH := aarch64
 endif
 
-# Choose the compiler.  Clang is now the default.
-# You can override: make CC=gcc
+# Clang default, override with make CC=gcc
 CC ?= clang
 
 CC_IS_CLANG := $(shell $(CC) --version 2>&1 | grep -c clang)
 
-# PicoPerf is only available on x86/x64 Linux.  On other platforms we fall back
-# to the portable perf_timer.h timing.
+# PicoPerf only on x86/x64 Linux
 USE_PICOPERF := 0
 ifeq ($(PLATFORM),linux)
     ifneq ($(filter $(ARCH),x86_64 i686 i386),)
@@ -53,13 +43,13 @@ endif
 PICOPERF_SRC := ../../PicoPerf/picoperf.c
 PICOPERF_INC := ../../PicoPerf
 
-# Build flags.
+# Build flags
 OPT_FLAGS  := -Ofast
 WARN_FLAGS := -Wall -Wextra
 LTO_FLAGS  := -flto
 EXTRA_FLAGS := -funroll-loops -fomit-frame-pointer -fno-semantic-interposition
 
-# -march=native works on most targets but can fail on some RISC-V toolchains.
+# -march=native can fail on some RISC-V toolchains
 ifeq ($(ARCH),riscv64)
     ARCH_FLAGS :=
 else
@@ -78,7 +68,7 @@ else
     INC_FLAGS :=
 endif
 
-# PGO flags differ between Clang and GCC.
+# PGO flags differ between Clang and GCC
 ifeq ($(CC_IS_CLANG),1)
     PGO_DIR := pgo_profiles
     PGO_GEN := -fprofile-instr-generate=$(PGO_DIR)/profile.clangraw
@@ -94,16 +84,12 @@ endif
 all:
 	$(CC) $(CFLAGS) $(INC_FLAGS) -o $(TARGET) $(ALL_SRC)
 
-# Profile build: symbols on, PicoPerf off, so perf can annotate the hot path.
+# Profile build: symbols on, PicoPerf off
 profile:
 	$(CC) -g -Ofast $(ARCH_FLAGS) $(LTO_FLAGS) $(WARN_FLAGS) -DUSE_PICOPERF=0 \
 	      $(INC_FLAGS) -o $(TARGET)_profile $(ALL_SRC)
 
-# PGO build:
-#   1. Compile with instrumentation.
-#   2. Run once with encrypt mode and once with decrypt mode to collect data.
-#   3. Compile again using the collected profile.
-#   4. Remove the temporary instrumented binary.
+# PGO: instrument -> train -> merge -> rebuild
 ifeq ($(CC_IS_CLANG),1)
 pgo:
 	@mkdir -p $(PGO_DIR)
@@ -129,7 +115,7 @@ pgo:
 	$(RM) $(TARGET)_gen
 endif
 
-# Remove generated binaries, PGO profiles, and leftover data files.
+# Remove build artifacts
 clean:
 	$(RM) $(TARGET) $(TARGET)_gen $(TARGET)_profile
 	$(RM) *.gcda *.gcno
@@ -137,7 +123,7 @@ clean:
 	$(RM) test.locked unlocked_test.data
 	$(RM) slow_profile
 
-# Show what platform/arch the build will target.
+# Show detected platform
 info:
 	@echo "PLATFORM    : $(PLATFORM)"
 	@echo "ARCH        : $(ARCH)"

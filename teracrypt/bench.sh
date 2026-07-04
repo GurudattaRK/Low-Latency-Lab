@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 # TeraCrypt build + PGO + perf benchmarking script.
-# x86_64 Linux only. Run from the directory containing the .c/.h files + Makefile.
+# Run from the teracrypt directory. Needs sudo for perf hardware counters.
 #
 # Usage:
-#   chmod +x bench.sh
-#   sudo ./bench.sh                 # full run: build, pgo, perf record+stat, all in results file
-#   sudo ./bench.sh --skip-pgo      # skip PGO stage (faster, if you just want perf on a plain build)
-#   sudo ./bench.sh --file-size 2G  # size of the test file used for benchmarking (default 1G)
-#   sudo ./bench.sh --cooldown 10   # seconds to sleep between runs to avoid thermal throttling (default 5)
-#
-# Needs sudo because perf hardware counters (cycles, cache-misses, etc.) require
-# elevated perf_event_paranoid access on most distros.
-#
-# Output: results_<timestamp>.txt -- send this whole file back for analysis.
+#   sudo ./bench.sh                 # full run
+#   sudo ./bench.sh --skip-pgo      # skip PGO
+#   sudo ./bench.sh --file-size 2G  # custom test file size (default 1G)
+#   sudo ./bench.sh --cooldown 10   # seconds between runs (default 5)
 
 set -uo pipefail
 
@@ -41,9 +35,7 @@ OUT="results_${TS}.txt"
 WORKDIR="$(pwd)/.bench_workdir"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
-# /tmp is tmpfs (RAM-backed) on many distros including Arch -- benchmarking
-# there silently measures RAM speed instead of real disk I/O. Use a dir next
-# to the source instead, and verify it isn't tmpfs either.
+# Avoid tmpfs -- it measures RAM speed, not disk I/O
 WORKDIR_FSTYPE=$(findmnt -no FSTYPE -T "$WORKDIR" 2>/dev/null)
 if [[ "$WORKDIR_FSTYPE" == "tmpfs" ]]; then
     echo "WARNING: $WORKDIR is on tmpfs (RAM-backed) -- throughput numbers will"
@@ -102,17 +94,12 @@ if [[ $SKIP_PGO -eq 0 ]]; then
     rm -f ./teracrypt  # so a partial/failed pipeline can't leave a stale binary that looks like success
     PGO_RC=0
     time make pgo || PGO_RC=$?
-    # Check both the exit code AND that the merge actually produced a
-    # profdata file AND that the final binary was rebuilt after it -- a
-    # failed llvm-profdata merge (e.g. zlib version mismatch between clang
-    # and llvm-profdata) can leave `make` exiting non-zero but an EARLIER
-    # stage's binary still sitting on disk looking executable, which the
-    # old file-existence-only check here incorrectly treated as success.
+    # Check exit code AND that the binary was actually rebuilt
+    # (a failed llvm-profdata merge can leave a stale binary around)
     if [[ $PGO_RC -ne 0 || ! -x ./teracrypt || ! -f .pgo/merged.profdata ]]; then
-        echo "PGO BUILD FAILED (exit code $PGO_RC). Falling back to plain build for benchmarking."
-        echo "(if this is a 'failed to uncompress data (zlib)' error from llvm-profdata,"
-        echo " it's usually a clang/llvm-profdata version mismatch -- try reinstalling"
-        echo " both together, e.g. 'sudo pacman -Syu llvm clang' on Arch)"
+        echo "PGO BUILD FAILED (exit code $PGO_RC). Falling back to plain build."
+        echo "(if this is a 'failed to uncompress data (zlib)' error,"
+        echo " it's a clang/llvm-profdata version mismatch)"
         cp "$WORKDIR/teracrypt_plain" teracrypt
         SKIP_PGO=1
     else
@@ -124,9 +111,7 @@ section "PREPARE TEST DATA (${TEST_FILE_SIZE})"
 head -c 128 /dev/urandom > "$WORKDIR/key.bin"
 fallocate -l "$TEST_FILE_SIZE" "$WORKDIR/test.bin" 2>/dev/null || \
     dd if=/dev/urandom of="$WORKDIR/test.bin" bs=1M count=1024 2>/dev/null
-# fallocate makes a sparse/zero file which is fine for throughput timing but
-# not for correctness -- overwrite with real random data so the crypto path
-# does real work and round-trip verification is meaningful.
+# Overwrite with real random data so round-trip verification is meaningful
 dd if=/dev/urandom of="$WORKDIR/test.bin" bs=1M count="$(du -m "$WORKDIR/test.bin" | cut -f1)" conv=notrunc 2>/dev/null
 ls -la "$WORKDIR/test.bin"
 
@@ -190,7 +175,7 @@ if command -v iostat &>/dev/null; then
     IOSTAT_PID=$!
     "$WORKDIR/teracrypt_plain" encrypt "$WORKDIR/test.bin" "$WORKDIR/out.enc" "$WORKDIR/key.bin" > /dev/null
     kill $IOSTAT_PID 2>/dev/null
-    echo "(iostat only captures idle-period samples around the run in this simple setup; for live disk utilization run 'iostat -x 1' in another terminal while benchmarking)"
+    echo "(iostat only captures samples around the run; for live disk util")
 else
     echo "iostat not installed (package: sysstat). Skipping."
 fi

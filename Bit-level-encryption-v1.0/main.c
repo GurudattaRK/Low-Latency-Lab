@@ -5,7 +5,7 @@
 #include <stdalign.h>
 #include <string.h>
 
-/* Compiler-specific loop unroll hints. The loop counts are fixed at compile time. */
+/* Loop unroll hints */
 #if defined(__GNUC__) && !defined(__clang__)
     #define UNROLL_4  _Pragma("GCC unroll 4")
     #define UNROLL_8  _Pragma("GCC unroll 8")
@@ -24,13 +24,13 @@
 #endif
 
 #if defined(__APPLE__) && defined(__aarch64__)
-    /* Apple Silicon uses 128-byte cache lines; most other CPUs use 64 bytes. */
+    /* Apple Silicon: 128-byte cache lines */
     #define MATRIX_ALIGN 128
 #else
     #define MATRIX_ALIGN 64
 #endif
 
-/* Make hot helper functions inline as aggressively as the compiler allows. */
+/* Hot helpers: inline as aggressively as possible */
 #if defined(__GNUC__) || defined(__clang__)
     #define FORCE_INLINE __attribute__((always_inline)) static inline
 #elif defined(_MSC_VER)
@@ -39,7 +39,7 @@
     #define FORCE_INLINE static inline
 #endif
 
-/* Allocate memory aligned to MATRIX_ALIGN bytes on any platform. */
+/* Aligned allocation wrapper */
 static void *aligned_alloc_wrapper(size_t align, size_t size)
 {
 #if defined(_WIN32)
@@ -63,7 +63,7 @@ static void aligned_free_wrapper(void *p)
 #endif
 }
 
-/* Use the AVX2 transpose on x86 with AVX2; otherwise use the scalar one. */
+/* Use AVX2 transpose on x86, scalar elsewhere */
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)) && defined(__AVX2__)
     #define HAVE_AVX2 1
     #include "avx2.c"
@@ -72,7 +72,7 @@ static void aligned_free_wrapper(void *p)
     #define transpose_matrix transpose_matrix_scalar
 #endif
 
-/* Pick the best timing backend for this platform. */
+/* Timing backend */
 #if USE_PICOPERF
     #include "picoperf.h"
     typedef int perf_timer_t;
@@ -84,7 +84,7 @@ static void aligned_free_wrapper(void *p)
     #define STOP_MEASURING(t)    print_measured_results(stop_measuring(&(t)))
 #endif
 
-#define BATCH_SIZE (1 << 20)  /* Read and write in 1 MiB chunks. */
+#define BATCH_SIZE (1 << 20)
 
 #if defined(__clang__)
     #define rotate_left(x,n)  __builtin_rotateleft32((x),(n))
@@ -111,7 +111,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
 {
     uint32_t t;
 
-    /* Stage 1: swap the upper and lower 16 bits of each row. */
+    /* Stage 1 */
     uint32_t mask = 0x0000FFFF;
     for (int j = 0; j < 16; j++) 
     {
@@ -120,7 +120,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
         m[j] = m[j] ^ (t << 16);
     }
 
-    /* Stage 2: swap the upper and lower 8 bits of each row. */
+    /* Stage 2 */
     mask = 0x00FF00FF;
     for (int j = 0; j < 32; j += 16)
     {
@@ -131,7 +131,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
             m[i] = m[i] ^ (t << 8);
         }
     }
-    /* Stage 3: swap the upper and lower 4 bits of each row. */
+    /* Stage 3 */
     mask = 0x0F0F0F0F;
     for (int j = 0; j < 32; j += 8)
     {
@@ -142,7 +142,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
             m[i] = m[i] ^ (t << 4);
         }
     }
-    /* Stage 4: swap the upper and lower 2 bits of each row. */
+    /* Stage 4 */
     mask = 0x33333333;
     for (int j = 0; j < 32; j += 4)
     {
@@ -153,7 +153,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
             m[i] = m[i] ^ (t << 2);
         }
     }
-    /* Stage 5: swap adjacent bits inside each row. */
+    /* Stage 5 */
     mask = 0x55555555;
     for (int j = 0; j < 32; j += 2) 
     {
@@ -163,10 +163,7 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
     }
 }
 
-/*
- * Precomputed tables for the rotation and XOR amounts.
- * Index 0 = encryption, index 1 = decryption.
- */
+/* Precomputed tables. Index 0 = encrypt, 1 = decrypt. */
 static uint8_t  scalar_rot_amount[2][8][2][32];
 static uint32_t scalar_xor_key[2][8][2];
 
@@ -176,22 +173,19 @@ static uint32_t scalar_xor_key[2][8][2];
     static __m256i avx2_xor_vec[2][8][2];
 #endif
 
-/*
- * Build the rotation-amount and XOR-key tables from the 128-byte key.
- * The tables depend only on the key, so they are computed once.
- */
+/* Build rotation/XOR tables from the 128-byte key */
 static void precompute_key_tables(const uint32_t *key_matrix)
 {
     UNROLL_8
     for (int round = 0; round < 8; round++)
     {
-        /* Encryption uses key words 0..31 in forward order. */
+        /* Encryption: key words forward */
         int ke_rot0 = (int)key_matrix[4 * round + 0];
         int ke_xor0 = (int)key_matrix[4 * round + 1];
         int ke_rot1 = (int)key_matrix[4 * round + 2];
         int ke_xor1 = (int)key_matrix[4 * round + 3];
 
-        /* Decryption uses the same key words in reverse order. */
+        /* Decryption: same key words reversed */
         int kd_xor0 = (int)key_matrix[31 - 4 * round];
         int kd_rot0 = (int)key_matrix[30 - 4 * round];
         int kd_xor1 = (int)key_matrix[29 - 4 * round];
@@ -207,25 +201,25 @@ static void precompute_key_tables(const uint32_t *key_matrix)
         {
             int amt;
 
-            /* Encryption phase 0: convert even lanes to right-rotate. */
+            /* Even lanes: right-rotate */
             amt = (ke_rot0 + i + (i & 1)) & 31;
             if (!(i & 1))
                 amt = (32 - amt) & 31;
             scalar_rot_amount[0][round][0][i] = (uint8_t)amt;
 
-            /* Encryption phase 1: convert odd lanes to right-rotate. */
+            /* Odd lanes: right-rotate */
             amt = (ke_rot1 + i + (i & 1)) & 31;
             if (i & 1)
                 amt = (32 - amt) & 31;
             scalar_rot_amount[0][round][1][i] = (uint8_t)amt;
 
-            /* Decryption phase 0: convert even lanes to right-rotate. */
+            /* Even lanes: right-rotate */
             amt = (kd_rot0 + i + (i & 1)) & 31;
             if (!(i & 1))
                 amt = (32 - amt) & 31;
             scalar_rot_amount[1][round][0][i] = (uint8_t)amt;
 
-            /* Decryption phase 1: convert odd lanes to right-rotate. */
+            /* Odd lanes: right-rotate */
             amt = (kd_rot1 + i + (i & 1)) & 31;
             if (i & 1)
                 amt = (32 - amt) & 31;
@@ -285,7 +279,7 @@ static void precompute_key_tables(const uint32_t *key_matrix)
             avx2_rot_comp[1][round][1][ymm] = _mm256_sub_epi32(thirty_two, avx2_rot_amount[1][round][1][ymm]);
         }
 
-        /* XOR vector has the key in element 7 (state index 31) only. */
+        /* XOR vector: key in element 7 (state[31]) only */
         avx2_xor_vec[0][round][0] = _mm256_set_epi32(ke_xor0, 0, 0, 0, 0, 0, 0, 0);
         avx2_xor_vec[0][round][1] = _mm256_set_epi32(ke_xor1, 0, 0, 0, 0, 0, 0, 0);
         avx2_xor_vec[1][round][0] = _mm256_set_epi32(kd_xor0, 0, 0, 0, 0, 0, 0, 0);
@@ -295,10 +289,7 @@ static void precompute_key_tables(const uint32_t *key_matrix)
 }
 
 #if HAVE_AVX2
-/*
- * Encrypt one 128-byte block entirely in AVX2 registers.
- * Loads the state, runs 8 rounds, stores the result.
- */
+/* Encrypt one 128-byte block in AVX2 registers */
 FORCE_INLINE void encrypt_block_avx2(uint32_t *state,
                                        const __m256i amounts[8][2][4],
                                        const __m256i comp[8][2][4],
@@ -333,9 +324,7 @@ FORCE_INLINE void encrypt_block_avx2(uint32_t *state,
     _mm256_store_si256((__m256i *)&state[24], r3);
 }
 
-/*
- * Decrypt one 128-byte block entirely in AVX2 registers.
- */
+/* Decrypt one 128-byte block in AVX2 registers */
 FORCE_INLINE void decrypt_block_avx2(uint32_t *state,
                                        const __m256i amounts[8][2][4],
                                        const __m256i comp[8][2][4],
@@ -370,11 +359,7 @@ FORCE_INLINE void decrypt_block_avx2(uint32_t *state,
     _mm256_store_si256((__m256i *)&state[24], r3);
 }
 
-/*
- * Encrypt two 128-byte blocks in parallel to expose more instruction-level
- * parallelism.  The two states are independent, so the CPU can issue the
- * transposes and rotations of the second block while the first is in flight.
- */
+/* Two blocks in parallel for more ILP */
 FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
                                           const __m256i amounts[8][2][4],
                                           const __m256i comp[8][2][4],
@@ -437,9 +422,7 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     _mm256_store_si256((__m256i *)&b[24], b3);
 }
 
-/*
- * Decrypt two 128-byte blocks in parallel.
- */
+/* Decrypt two blocks in parallel */
 FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
                                           const __m256i amounts[8][2][4],
                                           const __m256i comp[8][2][4],
@@ -618,7 +601,7 @@ int main(int argc, char **argv)
 #endif
             }
 
-                // Write full padded size so encrypted file is always a multiple of 128 bytes
+                // Write padded size so encrypted file is always a multiple of 128
                 fwrite(batch_buf, 1, padded, writer);
         }
 

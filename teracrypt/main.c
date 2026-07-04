@@ -54,7 +54,7 @@ static void worker_sigterm_handler(int sig) {
 #define WORKER_TERM_SIGNAL SIGKILL
 #endif
 
-/* ---- io_uring completion tagging: (op_type << 32) | slot_index ---- */
+/* io_uring user_data: (op << 32) | slot_idx */
 typedef enum { OP_READ = 0, OP_WRITE = 1, OP_TAIL_READ = 2, OP_TAIL_WRITE = 3 } OpType;
 
 __attribute__((always_inline)) static inline uint64_t pack_ud(OpType op, uint32_t slot) {
@@ -319,13 +319,7 @@ __attribute__((always_inline)) static inline int mpmc_queue_pop(mpmc_queue_t *q,
     return 1;
 }
 
-/* ---------------------------------------------------------------------
- * Worker: crypto only. Never touches io_uring or the file descriptors.
- * Infinite loop, no exit condition checked in the hot path -- the parent
- * kills every worker (WORKER_TERM_SIGNAL) only after confirming every
- * chunk's write has completed, at which point no worker can still be
- * mid-chunk on live data, so there's nothing to check for here.
- * ------------------------------------------------------------------- */
+/* Workers do crypto only. Parent kills them after all writes complete. */
 
 typedef struct {
     ChunkSlot*               slots;
@@ -351,15 +345,8 @@ __attribute__((always_inline)) static inline void worker_process(WorkerCtx* w)
             atomic_store_explicit(&s->state, SLOT_PROCESSING, memory_order_relaxed);
             process_region(s->buf, s->padded_size, w->mode, w->key_tables);
             atomic_store_explicit(&s->state, SLOT_WRITE_READY, memory_order_relaxed);
-            while (!mpmc_queue_push(w->write_queue, slot_idx)) {
-                /* write_queue capacity == next_pow2(total_slots) >= total_slots,
-                 * so a slot can always be re-homed here -- defensive only. */
-            }
+            while (!mpmc_queue_push(w->write_queue, slot_idx)) {}
         } else {
-            /* Queue empty: pause to reduce CAS contention on the shared
-             * dequeue_pos cache line. PAUSE is ~10 cycles vs ~1 for a
-             * spin, but drops the retry rate by ~10x, cutting wasted
-             * instructions and memory-bus traffic dramatically. */
             __builtin_ia32_pause();
         }
     }
@@ -449,8 +436,6 @@ int main(int argc, char** argv) {
     size_t file_size = (size_t)st.st_size;
     printf("Input file size: %zu bytes (%.2f MB)\n\n", file_size, file_size / (1024.0 * 1024));
 
-    /* O_DIRECT bypasses the page cache for writes; fall back to buffered
-     * I/O if the filesystem doesn't support it (tmpfs, some network FSes). */
     int fd_out = open(output_file, O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0644);
     int using_direct_io = 1;
     if (fd_out < 0) {
@@ -474,7 +459,6 @@ int main(int argc, char** argv) {
     struct timespec timer;
     start_measuring(&timer);
 
-    /* ---- empty file: nothing to do ---- */
     if (file_size == 0) {
         ftruncate(fd_out, 0);
         close(fd_in);
@@ -486,10 +470,7 @@ int main(int argc, char** argv) {
 
     uint64_t num_full_chunks = (uint64_t)file_size / CHUNK_SIZE;
 
-    /* ---- file smaller than one chunk: entirely a "tail", no worker
-     * pipeline, no fork, no io_uring at all -- just read/process/write
-     * inline on the parent. This is the natural replacement for the old
-     * code's separate PARALLEL_THRESHOLD single-core mode. ---- */
+    /* Small file: no pipeline, just do it inline */
     if (num_full_chunks == 0) {
         printf("File smaller than one chunk (%llu MiB) -- processing inline, no worker pipeline.\n\n",
                (unsigned long long)(CHUNK_SIZE / (1024 * 1024)));
@@ -534,7 +515,6 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    /* ---- full async pipeline ---- */
     int num_workers = (num_cores > 1) ? (num_cores - 1) : 1;
     uint32_t total_slots = (uint32_t)num_workers + MAX_INFLIGHT_READS + MAX_INFLIGHT_WRITES;
     uint32_t queue_capacity = next_pow2(total_slots);
@@ -590,9 +570,7 @@ int main(int argc, char** argv) {
     mpmc_queue_init(read_queue,  (mpmc_cell_t*)rq_cells_mem.aligned, queue_capacity);
     mpmc_queue_init(write_queue, (mpmc_cell_t*)wq_cells_mem.aligned, queue_capacity);
 
-    /* Free-slot bookkeeping is parent-private (only the parent ever marks a
-     * slot FREE or takes a FREE slot for a new read) so a plain array is
-     * enough -- no atomics, no queue, no cross-process contention here. */
+    /* Parent-private free list -- no atomics needed */
     uint32_t* free_list = (uint32_t*)malloc((size_t)total_slots * sizeof(uint32_t));
     uint32_t free_count = total_slots;
     for (uint32_t i = 0; i < total_slots; i++) free_list[i] = i;
@@ -626,12 +604,8 @@ int main(int argc, char** argv) {
         if (pid == 0) {
             close(fd_in);
             close(fd_out);
-            /* If the parent dies unexpectedly, don't spin forever as an
-             * orphan -- same signal choice as normal shutdown so a PGO
-             * training run still gets a chance to flush its profile even
-             * in this abnormal-parent-death case. */
             prctl(PR_SET_PDEATHSIG, WORKER_TERM_SIGNAL);
-            if (getppid() == 1) _exit(1); /* parent already gone (fork/prctl race) */
+            if (getppid() == 1) _exit(1);
             worker_process(&ctx);
             _exit(0); /* unreachable -- worker_process() loops until signaled */
         }
@@ -752,8 +726,7 @@ int main(int argc, char** argv) {
                     if (!using_direct_read)
                         posix_fadvise(fd_in, (off_t)tail_offset, (off_t)actual, POSIX_FADV_DONTNEED);
 
-                    /* Inline on the parent -- the one deliberate exception
-                     * to "parent does no crypto", for the ragged tail only. */
+                    /* Tail processed inline on parent */
                     process_region((uint8_t*)tail_buf_mem.aligned, padded, mode, key_tables);
                     tail_padded_size = padded;
 
@@ -783,7 +756,7 @@ int main(int argc, char** argv) {
         }
         if (fatal_error) break;
 
-        /* Drain worker-submitted "ready to write" queue, issue the real writes. */
+        /* Drain write queue, issue writes */
         int new_sqes = 0;
         while (inflight_writes < MAX_INFLIGHT_WRITES) {
             uint32_t slot_idx;
@@ -801,7 +774,6 @@ int main(int argc, char** argv) {
             new_sqes++;
         }
 
-        /* Keep the read pipeline full. */
         while (inflight_reads < MAX_INFLIGHT_READS &&
                next_read_offset < num_full_chunks * CHUNK_SIZE &&
                free_count > 0) {
@@ -818,23 +790,13 @@ int main(int argc, char** argv) {
             new_sqes++;
         }
 
-        /* Only flush the SQ ring when we actually added SQEs.  With SQPOLL
-         * the kernel SQ thread polls the ring continuously, so submit is
-         * just a tail-pointer flush -- calling it on every iteration when
-         * no SQEs were added is pure overhead. */
         if (new_sqes)
             io_uring_submit(&uring);
 
-        /* If nothing happened this iteration (no CQEs, no new SQEs),
-         * pause briefly instead of spinning at full speed.  This cuts
-         * the parent's wasted cycles dramatically without adding any
-         * syscall latency -- the pause is ~10 cycles. */
         if (!got_cqe && !new_sqes)
             __builtin_ia32_pause();
 
-        /* Lightweight crash safety net: one waitpid(WNOHANG) per interval,
-         * round-robin across workers, parent-only. See design doc for why
-         * this is bounded-but-not-instant by design. */
+        /* Periodic worker crash check */
         iter_count++;
         if (iter_count % CRASH_CHECK_EVERY_N_ITERS == 0) {
             pid_t p = pids[crash_check_idx];
@@ -843,7 +805,7 @@ int main(int argc, char** argv) {
                 if (r == p) {
                     fprintf(stderr, "[ERROR] worker %d (PID %d) died unexpectedly -- aborting\n",
                             crash_check_idx, p);
-                    pids[crash_check_idx] = -1; /* already reaped -- don't signal/wait on it again */
+                    pids[crash_check_idx] = -1;
                     fatal_error = 1;
                 }
             }
@@ -854,8 +816,6 @@ int main(int argc, char** argv) {
     uint64_t elapsed_ns = stop_measuring(&timer);
 
     if (!fatal_error) {
-        /* Trims any O_DIRECT tail padding so the output file's size exactly
-         * matches the input's, rather than being rounded up to DIRECT_IO_ALIGN. */
         ftruncate(fd_out, (off_t)file_size);
     }
 

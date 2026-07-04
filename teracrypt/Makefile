@@ -1,27 +1,22 @@
-# TeraCrypt build file.
-# x86_64 Linux, clang only (uses clang-specific attributes/pragmas and LLVM PGO).
-# Requires: clang, lld, liburing (dev headers + lib), llvm-profdata (for `make pgo` only).
+# TeraCrypt build file. x86_64 Linux, clang only.
+# Requires: clang, lld, liburing, llvm-profdata (for pgo).
 
 CC := clang
 LD := clang
 
 TARGET := teracrypt
 
-# All code is inlined via crypto_core.h -- only main.c needs compiling.
+# All code is inlined via crypto_core.h
 SRCS := main.c
 OBJS := $(SRCS:.c=.o)
 
 WARN       := -Wall -Wextra
 ARCH       := -march=native -mtune=native
-# _GNU_SOURCE is required for CPU_ZERO/CPU_SET/pthread_setaffinity_np
-# (platform.c) -- -std=gnu11 only enables GNU *language* extensions, it does
-# NOT define _GNU_SOURCE for glibc's feature-test macros. Without this,
-# clang fails with "call to undeclared function 'CPU_ZERO'" etc.
+# _GNU_SOURCE for CPU_ZERO/CPU_SET etc.
 BASE_CFLAGS := -std=gnu11 -D_GNU_SOURCE -pthread $(WARN) $(ARCH) -mavx2
 OPT_CFLAGS  := -Ofast -flto=full -fno-omit-frame-pointer -funroll-loops -fno-plt -fno-math-errno
 
-# Overridable from the command line / recursive `make` calls (used by the
-# `pgo` target below to build instrumented, then re-optimized, binaries).
+# Overridable (used by pgo target)
 CFLAGS  ?= $(BASE_CFLAGS) $(OPT_CFLAGS)
 LDFLAGS ?= -fuse-ld=lld -pthread
 LIBS    := -luring
@@ -29,8 +24,8 @@ LIBS    := -luring
 PGO_DIR         := .pgo
 PGO_PROFILE     := $(PGO_DIR)/merged.profdata
 PGO_TRAIN_KEY   := $(PGO_DIR)/train_key.bin
-PGO_TRAIN_SMALL := $(PGO_DIR)/train_small.bin   # below PARALLEL_THRESHOLD -> single-core path
-PGO_TRAIN_LARGE := $(PGO_DIR)/train_large.bin   # above PARALLEL_THRESHOLD -> forked/parallel path
+PGO_TRAIN_SMALL := $(PGO_DIR)/train_small.bin
+PGO_TRAIN_LARGE := $(PGO_DIR)/train_large.bin
 
 .PHONY: all clean pgo
 
@@ -46,11 +41,7 @@ clean:
 	rm -f *.o $(TARGET) $(TARGET)_instrumented
 	rm -rf $(PGO_DIR)
 
-# ---------------------------------------------------------------------------
-# PGO: instrument -> train (small + large, encrypt + decrypt) -> merge -> optimize
-# Not needed for day-to-day benchmarking (`bench.sh --skip-pgo` skips this
-# entirely) but kept working here in case you want to come back to it later.
-# ---------------------------------------------------------------------------
+# PGO: instrument -> train -> merge -> optimize
 pgo:
 	@echo "==> PGO 1/4: instrumented build"
 	$(MAKE) clean

@@ -2,8 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-//  LINUX  (x86, arm64, RISC-V)
-//  picoperf already covers x86 linux,this is the fallback for the other arches
+// Linux (fallback for non-x86, where PicoPerf isn't available)
 #if defined(__linux__)
 
 #include <time.h>
@@ -27,7 +26,7 @@ static inline void print_measured_results(uint64_t ns)
     printf("elapsed: %llu ns  (%.3f ms)\n",(unsigned long long)ns,(double)ns / 1000000.0);
 }
 
-//  macOS  (x86, arm64)
+// macOS
 #elif defined(__APPLE__)
 
 #include <time.h>   /* clock_gettime_nsec_np */
@@ -50,7 +49,7 @@ static inline void print_measured_results(uint64_t ns)
 }
 
 
-//  WINDOWS  (x86, arm64)
+// Windows
 #elif defined(_WIN32)
 
 #include <windows.h>
