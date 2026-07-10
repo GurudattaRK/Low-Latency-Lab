@@ -1,22 +1,23 @@
-# TeraCrypt build file. x86_64 Linux, clang only.
-# Requires: clang, lld, liburing, llvm-profdata (for pgo).
+# TeraCrypt is Linux + clang only - it leans on io_uring and clang's PGO, so
+# there's no point pretending it's portable like the reference project.
+# You'll need: clang, lld, liburing, and llvm-profdata if you want `make pgo`.
 
 CC := clang
 LD := clang
 
 TARGET := teracrypt
 
-# All code is inlined via crypto_core.h
+# one translation unit - the crypto lives in crypto_core.h so it all inlines
 SRCS := main.c
 OBJS := $(SRCS:.c=.o)
 
 WARN       := -Wall -Wextra
 ARCH       := -march=native -mtune=native
-# _GNU_SOURCE for CPU_ZERO/CPU_SET etc.
+# _GNU_SOURCE is what unlocks CPU_ZERO/CPU_SET, O_DIRECT, MADV_HUGEPAGE and friends
 BASE_CFLAGS := -std=gnu11 -D_GNU_SOURCE -pthread $(WARN) $(ARCH) -mavx2
 OPT_CFLAGS  := -Ofast -flto=full -fno-omit-frame-pointer -fno-plt -fno-math-errno
 
-# Overridable (used by pgo target)
+# ?= so the pgo target can swap these out without editing the file
 CFLAGS  ?= $(BASE_CFLAGS) $(OPT_CFLAGS)
 LDFLAGS ?= -fuse-ld=lld -pthread
 LIBS    := -luring
@@ -41,7 +42,10 @@ clean:
 	rm -f *.o $(TARGET) $(TARGET)_instrumented
 	rm -rf $(PGO_DIR)
 
-# PGO: instrument -> train -> merge -> optimize
+# The four-step PGO dance. Builds a counter-instrumented binary, runs it on a
+# small + a large random file (both directions) to collect a realistic profile,
+# merges the raw counters, then rebuilds for real using them. Worth it - the
+# branch layout in the hot loop gets noticeably better.
 pgo:
 	@echo "==> PGO 1/4: instrumented build"
 	$(MAKE) clean

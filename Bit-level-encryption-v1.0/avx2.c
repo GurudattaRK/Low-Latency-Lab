@@ -11,13 +11,16 @@
     #endif
 #endif
 
-/* In-place 32x32 bit matrix transpose in four AVX2 registers.
- * r0 = rows 0..7, r1 = rows 8..15, r2 = rows 16..23, r3 = rows 24..31. */
+/* The whole 32x32 transpose done in-register across 4 ymm regs, no memory.
+ * r0 holds rows 0..7, r1 rows 8..15, r2 16..23, r3 24..31 (8 uint32 each).
+ * Stages 1-2 are easy (they stay inside a 32-bit lane). Stages 3-5 have to
+ * hop across the 128-bit lane boundary, which is why the permute/blend dance
+ * shows up - AVX2 can't shift across that boundary directly. */
 FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m256i *r3)
 {
     __m256i mask, t;
 
-    /* Stage 1: 16-bit */
+    /* stage 1: 16-bit swap */
     mask = _mm256_set1_epi32(0x0000FFFF);
     t  = _mm256_and_si256(_mm256_xor_si256(_mm256_srli_epi32(*r0, 16), *r2), mask);
     *r2 = _mm256_xor_si256(*r2, t);
@@ -27,7 +30,7 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
     *r3 = _mm256_xor_si256(*r3, t);
     *r1 = _mm256_xor_si256(*r1, _mm256_slli_epi32(t, 16));
 
-    /* Stage 2: 8-bit */
+    /* stage 2: 8-bit */
     mask = _mm256_set1_epi32(0x00FF00FF);
     t  = _mm256_and_si256(_mm256_xor_si256(_mm256_srli_epi32(*r0, 8), *r1), mask);
     *r1 = _mm256_xor_si256(*r1, t);
@@ -37,7 +40,7 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
     *r3 = _mm256_xor_si256(*r3, t);
     *r2 = _mm256_xor_si256(*r2, _mm256_slli_epi32(t, 8));
 
-    /* Stage 3: 4-bit */
+    /* stage 3: 4-bit - from here on we need permute4x64 to cross lanes */
     mask = _mm256_set1_epi32(0x0F0F0F0F);
 
     __m256i r0p = _mm256_permute4x64_epi64(*r0, 0x4E);
@@ -64,7 +67,7 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
     *r3 = _mm256_xor_si256(*r3,  _mm256_slli_epi32(t, 4));
     *r3 = _mm256_blend_epi32(*r3, _mm256_permute4x64_epi64(r3p, 0x4E), 0xF0);
 
-    /* Stage 4: 2-bit */
+    /* stage 4: 2-bit */
     mask = _mm256_set1_epi32(0x33333333);
 
     #define STAGE4_REG(reg)                                                  \
@@ -84,7 +87,7 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
     STAGE4_REG(*r2);
     STAGE4_REG(*r3);
 
-    /* Stage 5: 1-bit */
+    /* stage 5: last one, single bits */
     mask = _mm256_set1_epi32(0x55555555);
 
     #define STAGE5_REG(reg)                                                  \
@@ -108,7 +111,8 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
     #undef STAGE5_REG
 }
 
-/* Transpose a matrix in memory (load, transpose, store) */
+/* Convenience wrapper: pull the matrix in from memory, transpose, write back.
+ * The scalar path uses this; the block functions keep everything in regs. */
 FORCE_INLINE void transpose_matrix_avx2(uint32_t * __restrict__ m)
 {
     __m256i r0 = _mm256_load_si256((__m256i*)&m[0]);
@@ -124,7 +128,9 @@ FORCE_INLINE void transpose_matrix_avx2(uint32_t * __restrict__ m)
     _mm256_store_si256((__m256i*)&m[24], r3);
 }
 
-/* Per-lane right rotation via variable shifts */
+/* Rotate each of the 8 lanes right by its own amount. AVX2 has no rotate
+ * instruction, so it's the usual (x >> n) | (x << (32-n)). 'comp' is the
+ * precomputed (32 - amount) so we don't recompute it every call. */
 FORCE_INLINE __m256i rotate_all_right(__m256i x, __m256i amount, __m256i comp)
 {
     return _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));

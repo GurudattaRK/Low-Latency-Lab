@@ -1,6 +1,11 @@
 #ifndef CRYPTO_CORE_H
 #define CRYPTO_CORE_H
 
+/* This is the actual cipher, lifted straight out of the single-core reference
+ * project and dropped in here as a header so everything inlines into the worker
+ * hot loop. Same 128-byte block = 32x32 bit matrix, same 8 rounds. The only real
+ * difference from the reference is the streaming stores at the end (see below). */
+
 #include <stdint.h>
 #include <stddef.h>
 #include <immintrin.h>
@@ -31,12 +36,15 @@ struct KeyTables {
     __m256i avx2_xor_vec[2][8][2];
 };
 
-/* AVX2 primitives */
+/* --- the AVX2 building blocks --- */
 
+/* Full 32x32 bit transpose across 4 ymm regs. Stages 1-2 stay inside a lane;
+ * 3-5 need permute4x64/blend to reach across the 128-bit lane split. */
 FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m256i *r3)
 {
     __m256i mask, t;
 
+    /* 16-bit swap */
     mask = _mm256_set1_epi32(0x0000FFFF);
     t  = _mm256_and_si256(_mm256_xor_si256(_mm256_srli_epi32(*r0, 16), *r2), mask);
     *r2 = _mm256_xor_si256(*r2, t);
@@ -123,12 +131,13 @@ FORCE_INLINE void transpose_avx2_regs(__m256i *r0, __m256i *r1, __m256i *r2, __m
     #undef STAGE5_REG
 }
 
+/* per-lane right rotate; comp is the precomputed (32 - amount) */
 FORCE_INLINE __m256i rotate_all_right(__m256i x, __m256i amount, __m256i comp)
 {
     return _mm256_or_si256(_mm256_srlv_epi32(x, amount), _mm256_sllv_epi32(x, comp));
 }
 
-/* scalar transpose */
+/* --- scalar transpose (odd-block fallback, and non-x86 builds) --- */
 
 FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
 {
@@ -183,8 +192,8 @@ FORCE_INLINE void transpose_matrix_scalar(uint32_t * __restrict__ m)
     }
 }
 
-/* key table precomputation */
-
+/* Expand the 128-byte key into every table the hot loops need, done once at
+ * startup and dropped into shared memory so all the workers read the same copy. */
 FORCE_INLINE void precompute_key_tables(const uint32_t key_matrix[32], struct KeyTables* tables)
 {
     UNROLL_8
@@ -290,7 +299,8 @@ FORCE_INLINE void precompute_key_tables(const uint32_t key_matrix[32], struct Ke
     }
 }
 
-/* AVX2 encrypt/decrypt two blocks in parallel for ILP */
+/* Two independent blocks per call. No dependency between a and b, so the CPU's
+ * out-of-order engine interleaves them and hides the transpose latency. */
 
 FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
                                           const __m256i amounts[8][2][4],
@@ -343,6 +353,9 @@ FORCE_INLINE void encrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
         transpose_avx2_regs(&b0, &b1, &b2, &b3);
     }
 
+    /* stream (non-temporal) stores: this result goes straight to disk via
+     * O_DIRECT, we're never going to read it back, so don't waste cache on it.
+     * The worker's sfence afterwards is what makes these visible to the parent. */
     _mm256_stream_si256((__m256i *)&a[0],  a0);
     _mm256_stream_si256((__m256i *)&a[8],  a1);
     _mm256_stream_si256((__m256i *)&a[16], a2);
@@ -416,7 +429,8 @@ FORCE_INLINE void decrypt_two_blocks_avx2(uint32_t *a, uint32_t *b,
     _mm256_stream_si256((__m256i *)&b[24], b3);
 }
 
-/* scalar encrypt/decrypt single block */
+/* Scalar single-block path. Only used to mop up the odd block when a region has
+ * an odd number of them - the AVX2 path always chews two at a time. */
 
 FORCE_INLINE void encrypt_block_scalar(uint32_t *state,
                                         const uint8_t rot_amt[8][2][32],
@@ -468,7 +482,9 @@ FORCE_INLINE void decrypt_block_scalar(uint32_t *state,
     }
 }
 
-/* process_region: two blocks at a time for max ILP, scalar fallback for odd block */
+/* The one entry point the workers call: crunch a whole region (a chunk) in
+ * place. Runs through it two blocks at a time, then handles a leftover odd
+ * block with the scalar path if the count wasn't even. */
 
 FORCE_INLINE void process_region(uint8_t* data, size_t size, OperationMode mode,
                    const struct KeyTables* tables)

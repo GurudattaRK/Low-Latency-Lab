@@ -1,4 +1,15 @@
 *.DS_Store
 *.o
 *.gcda
+*.gcno
+*.profraw
+*.profdata
 .pgo/
+
+# binaries
+/teracrypt/teracrypt
+/Bit-level-encryption-v1.0/main
+
+# benchmark artifacts
+.bench_workdir/
+*.sh

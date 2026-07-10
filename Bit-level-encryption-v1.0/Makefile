@@ -1,13 +1,14 @@
-# Cross-platform Makefile
-# GCC and Clang. Linux, macOS, Windows (MSYS2/MinGW).
-# x86_64, i386, aarch64, riscv64.
-#
-# make / make pgo / make clean / make info
+# Build for pretty much anything: gcc or clang, on Linux/macOS/Windows,
+# x86/ARM/RISC-V. The messy detection below is just so `make` does the right
+# thing without me having to pass flags every time.
+#   make        -> optimized build
+#   make pgo    -> profile-guided build (slower to build, faster to run)
+#   make clean / make info
 
 SRC    := main.c
 TARGET := main
 
-# Detect OS
+# figure out which OS we're on
 UNAME := $(shell uname -s)
 RM    := rm -f
 
@@ -21,7 +22,7 @@ else
     PLATFORM := linux
 endif
 
-# Detect arch (normalize arm64 -> aarch64)
+# macOS calls it arm64, linux calls it aarch64 - normalize so the checks below work
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),arm64)
     ARCH := aarch64
@@ -32,7 +33,7 @@ CC ?= clang
 
 CC_IS_CLANG := $(shell $(CC) --version 2>&1 | grep -c clang)
 
-# PicoPerf only on x86/x64 Linux
+# the rdtsc timer only makes sense on x86 linux; everywhere else use the fallback
 USE_PICOPERF := 0
 ifeq ($(PLATFORM),linux)
     ifneq ($(filter $(ARCH),x86_64 i686 i386),)
@@ -43,13 +44,13 @@ endif
 PICOPERF_SRC := ../../PicoPerf/picoperf.c
 PICOPERF_INC := ../../PicoPerf
 
-# Build flags
+# the flags that actually matter for speed
 OPT_FLAGS  := -Ofast
 WARN_FLAGS := -Wall -Wextra
 LTO_FLAGS  := -flto
 EXTRA_FLAGS := -funroll-loops -fomit-frame-pointer -fno-semantic-interposition
 
-# -march=native can fail on some RISC-V toolchains
+# -march=native trips up some RISC-V toolchains, so skip it there
 ifeq ($(ARCH),riscv64)
     ARCH_FLAGS :=
 else
@@ -68,7 +69,7 @@ else
     INC_FLAGS :=
 endif
 
-# PGO flags differ between Clang and GCC
+# clang and gcc spell their PGO flags differently - annoying but unavoidable
 ifeq ($(CC_IS_CLANG),1)
     PGO_DIR := pgo_profiles
     PGO_GEN := -fprofile-instr-generate=$(PGO_DIR)/profile.clangraw
@@ -89,7 +90,8 @@ profile:
 	$(CC) -g -Ofast $(ARCH_FLAGS) $(LTO_FLAGS) $(WARN_FLAGS) -DUSE_PICOPERF=0 \
 	      $(INC_FLAGS) -o $(TARGET)_profile $(ALL_SRC)
 
-# PGO: instrument -> train -> merge -> rebuild
+# PGO in four steps: build with counters, run it on real data, merge the
+# profile, rebuild using it. The training runs point at my local test files.
 ifeq ($(CC_IS_CLANG),1)
 pgo:
 	@mkdir -p $(PGO_DIR)
@@ -115,7 +117,7 @@ pgo:
 	$(RM) $(TARGET)_gen
 endif
 
-# Remove build artifacts
+# nuke everything the build spits out
 clean:
 	$(RM) $(TARGET) $(TARGET)_gen $(TARGET)_profile
 	$(RM) *.gcda *.gcno
@@ -123,7 +125,7 @@ clean:
 	$(RM) test.locked unlocked_test.data
 	$(RM) slow_profile
 
-# Show detected platform
+# handy for debugging "why did it pick those flags"
 info:
 	@echo "PLATFORM    : $(PLATFORM)"
 	@echo "ARCH        : $(ARCH)"

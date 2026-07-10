@@ -21,7 +21,8 @@
 
 #include <liburing.h>
 
-/* ---- constants ---- */
+/* Tunables. CACHE_LINE_SIZE / DIRECT_IO_ALIGN are hardware facts (64-byte lines,
+ * O_DIRECT wants 4K alignment); the rest are knobs I landed on after benchmarking. */
 #define CACHE_LINE_SIZE 64
 #define DIRECT_IO_ALIGN 4096
 #define PAGE_SIZE 4096
@@ -43,7 +44,9 @@
 
 #define HUGEPAGE_SIZE (2ULL * 1024 * 1024)
 
-/* ---- PGO worker termination ---- */
+/* During a PGO training run the workers need to flush their profile counters,
+ * so we kill them politely with SIGTERM and let a handler _exit(0). In a normal
+ * build there's nothing to flush, so SIGKILL is fine (and faster). */
 #if defined(__clang__) && defined(PGO_INSTRUMENTED)
 static void worker_sigterm_handler(int sig) {
     (void)sig;
@@ -54,7 +57,9 @@ static void worker_sigterm_handler(int sig) {
 #define WORKER_TERM_SIGNAL SIGKILL
 #endif
 
-/* io_uring user_data: (op << 32) | slot_idx */
+/* Every io_uring op carries a 64-bit tag we get back on completion. We pack the
+ * op type in the high 32 bits and the slot index in the low 32 - that way one
+ * completion tells us both "what finished" and "which buffer". */
 typedef enum { OP_READ = 0, OP_WRITE = 1, OP_TAIL_READ = 2, OP_TAIL_WRITE = 3 } OpType;
 
 __attribute__((always_inline)) static inline uint64_t pack_ud(OpType op, uint32_t slot) {
@@ -69,7 +74,7 @@ __attribute__((always_inline)) static inline uint32_t next_pow2(uint32_t v) {
     return v + 1;
 }
 
-/* ---- perf timer (inlined) ---- */
+/* dead-simple monotonic timer, inlined so it doesn't show up in profiles */
 __attribute__((always_inline)) static inline void start_measuring(struct timespec *ts)
 {
     clock_gettime(CLOCK_MONOTONIC, ts);
@@ -88,7 +93,9 @@ __attribute__((always_inline)) static inline void print_measured_results(uint64_
     printf("Elapsed: %.3f ms (%.6f s)\n", elapsed_ns / 1e6, elapsed_ns / 1e9);
 }
 
-/* ---- platform functions (inlined) ---- */
+/* Poke around /sys to count PHYSICAL cores (not hyperthreads). We deliberately
+ * ignore SMT siblings - two workers fighting over one core's execution units is
+ * slower than one worker owning it. */
 __attribute__((always_inline)) static inline int get_core_count(void) {
     int max_cores = 1024;
     int* core_ids = calloc(max_cores, sizeof(int));
@@ -214,7 +221,9 @@ __attribute__((always_inline)) static inline void* allocate_aligned_buffer(size_
     return ptr;
 }
 
-/* ---- shared memory allocation ---- */
+/* Workers are separate processes (fork), so anything they share with the parent
+ * has to live in MAP_SHARED memory. This wrapper mmaps a block and hands back an
+ * aligned pointer inside it (keeping the original base around so we can munmap). */
 typedef struct {
     void*  base;
     void*  aligned;
@@ -240,7 +249,10 @@ __attribute__((always_inline)) static inline SharedMem allocate_shared_mem(size_
     return mem;
 }
 
-/* ---- chunk pool (inlined) ---- */
+/* A slot is one 8 MiB buffer plus its bookkeeping. It walks through these states
+ * as it flows read -> crypto -> write. 'state' is atomic because the parent and a
+ * worker both touch it, but it's really just a debugging aid - the queues are
+ * what actually hand ownership across. */
 typedef enum {
     SLOT_FREE = 0,
     SLOT_READ_PENDING,
@@ -271,7 +283,11 @@ __attribute__((always_inline)) static inline void chunk_pool_init(ChunkSlot* slo
     }
 }
 
-/* ---- MPMC queue (inlined) ---- */
+/* Dmitry Vyukov's bounded MPMC queue. Lock-free, no mutexes. Each cell carries a
+ * sequence number that acts as the handshake between producer and consumer, so
+ * there's no single contended counter everyone CAS-es on. The padding keeps the
+ * head and tail on separate cache lines (otherwise producers and consumers would
+ * ping-pong the same line - classic false sharing). */
 typedef struct {
     _Atomic uint32_t seq;
     uint32_t         value;
@@ -355,7 +371,9 @@ __attribute__((always_inline)) static inline int mpmc_queue_pop(mpmc_queue_t *q,
     return 1;
 }
 
-/* Workers do crypto only. Parent kills them after all writes complete. */
+/* Workers do nothing but crypto - no I/O, no syscalls in the hot loop. They spin
+ * pulling slots off the read queue, encrypt in place, push to the write queue.
+ * The parent reaps them once every byte has been written. */
 
 typedef struct {
     ChunkSlot*               slots;
@@ -380,10 +398,15 @@ __attribute__((always_inline)) static inline void worker_process(WorkerCtx* w)
             ChunkSlot* s = &w->slots[slot_idx];
             atomic_store_explicit(&s->state, SLOT_PROCESSING, memory_order_relaxed);
             process_region(s->buf, s->padded_size, w->mode, w->key_tables);
+            /* the crypto uses non-temporal (streaming) stores, which can land
+             * out of order - fence here so the parent definitely sees finished
+             * data before we advertise the slot as writable. */
             _mm_sfence();
             atomic_store_explicit(&s->state, SLOT_WRITE_READY, memory_order_relaxed);
             while (!mpmc_queue_push(w->write_queue, slot_idx)) {}
         } else {
+            /* nothing to do - hint the core we're spinning so it can back off
+             * (saves power and plays nicer with an SMT sibling) */
             __builtin_ia32_pause();
         }
     }
@@ -507,7 +530,9 @@ int main(int argc, char** argv) {
 
     uint64_t num_full_chunks = (uint64_t)file_size / CHUNK_SIZE;
 
-    /* Small file: no pipeline, just do it inline */
+    /* Anything smaller than one chunk isn't worth spinning up the whole
+     * fork + io_uring + queue machinery for. Just read it, crunch it, write
+     * it, done - all on the parent. */
     if (num_full_chunks == 0) {
         printf("File smaller than one chunk (%llu MiB) -- processing inline, no worker pipeline.\n\n",
                (unsigned long long)(CHUNK_SIZE / (1024 * 1024)));
@@ -607,7 +632,8 @@ int main(int argc, char** argv) {
     mpmc_queue_init(read_queue,  (mpmc_cell_t*)rq_cells_mem.aligned, queue_capacity);
     mpmc_queue_init(write_queue, (mpmc_cell_t*)wq_cells_mem.aligned, queue_capacity);
 
-    /* Parent-private free list -- no atomics needed */
+    /* Only the parent ever touches the free list, so it's a plain array - no
+     * atomics, no locks. Workers get slots handed to them through the queues. */
     uint32_t* free_list = (uint32_t*)malloc((size_t)total_slots * sizeof(uint32_t));
     uint32_t free_count = total_slots;
     for (uint32_t i = 0; i < total_slots; i++) free_list[i] = i;
@@ -639,12 +665,16 @@ int main(int argc, char** argv) {
             break;
         }
         if (pid == 0) {
+            /* child: it doesn't do its own I/O, so drop the fds. PR_SET_PDEATHSIG
+             * makes the kernel signal us if the parent ever dies, so we can't be
+             * left orphaned spinning forever. The getppid()==1 check catches the
+             * race where the parent died between fork and prctl. */
             close(fd_in);
             close(fd_out);
             prctl(PR_SET_PDEATHSIG, WORKER_TERM_SIGNAL);
             if (getppid() == 1) _exit(1);
             worker_process(&ctx);
-            _exit(0); /* unreachable -- worker_process() loops until signaled */
+            _exit(0); /* never gets here - worker_process spins until we kill it */
         }
         pids[i] = pid;
         printf("  Worker %d forked (PID %d, pinned to core %d)\n", i, pid, ctx.core_id);
@@ -763,7 +793,8 @@ int main(int argc, char** argv) {
                     if (!using_direct_read)
                         posix_fadvise(fd_in, (off_t)tail_offset, (off_t)actual, POSIX_FADV_DONTNEED);
 
-                    /* Tail processed inline on parent */
+                    /* the ragged last chunk is tiny, so the parent just does it
+                     * itself rather than routing it through a worker */
                     process_region((uint8_t*)tail_buf_mem.aligned, padded, mode, key_tables);
                     tail_padded_size = padded;
 
@@ -793,7 +824,8 @@ int main(int argc, char** argv) {
         }
         if (fatal_error) break;
 
-        /* Drain write queue, issue writes */
+        /* pull everything the workers have finished and turn it into write SQEs,
+         * up to the inflight cap so we don't flood the ring */
         int new_sqes = 0;
         while (inflight_writes < MAX_INFLIGHT_WRITES) {
             uint32_t slot_idx;
@@ -833,7 +865,9 @@ int main(int argc, char** argv) {
         if (!got_cqe && !new_sqes)
             __builtin_ia32_pause();
 
-        /* Periodic worker crash check */
+        /* Every so often, make sure a worker didn't segfault on us. Doing this
+         * every iteration would be wasteful (waitpid is a syscall), so we
+         * round-robin one worker per check, once every N spins. */
         iter_count++;
         if (iter_count % CRASH_CHECK_EVERY_N_ITERS == 0) {
             pid_t p = pids[crash_check_idx];
