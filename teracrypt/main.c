@@ -25,9 +25,9 @@
  * O_DIRECT wants 4K alignment); the rest are knobs I landed on after benchmarking. */
 #define CACHE_LINE_SIZE 64
 #define DIRECT_IO_ALIGN 4096
-#define PAGE_SIZE 4096
+#define TC_PAGE_SIZE 4096
 
-#define EXIT_SUCCESS           0
+/* EXIT_SUCCESS is already 0 via <stdlib.h> - don't redefine it, just reuse it. */
 #define EXIT_INVALID_ARGS      1
 #define EXIT_FILE_NOT_FOUND    2
 #define EXIT_MEMORY_ALLOC_FAIL 3
@@ -204,7 +204,8 @@ __attribute__((always_inline)) static inline void pin_to_core(int core_id) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
-    sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) != 0)
+        fprintf(stderr, "[WARN] Failed to pin to core %d: %s\n", core_id, strerror(errno));
 }
 
 __attribute__((always_inline)) static inline size_t get_available_ram(void) {
@@ -217,7 +218,7 @@ __attribute__((always_inline)) static inline size_t get_available_ram(void) {
 
 __attribute__((always_inline)) static inline void* allocate_aligned_buffer(size_t size) {
     void* ptr = NULL;
-    posix_memalign(&ptr, PAGE_SIZE, size);
+    posix_memalign(&ptr, TC_PAGE_SIZE, size);
     return ptr;
 }
 
