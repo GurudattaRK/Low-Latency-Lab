@@ -200,6 +200,30 @@ __attribute__((always_inline)) static inline int get_nth_online_cpu(int n)
     return phys_cpus[n];
 }
 
+// Return the n-th CPU in the process's current affinity mask (wraps around).
+// Respects taskset/cgroup cpusets, so pinning works inside an isolated
+// partition instead of assuming CPU 0..N are usable.
+static int nth_allowed_cpu(int n)
+{
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0) {
+        int count = 0;
+        for (int c = 0; c < CPU_SETSIZE; c++)
+            if (CPU_ISSET(c, &allowed)) count++;
+        if (count > 0) {
+            int want = n % count;
+            int seen = 0;
+            for (int c = 0; c < CPU_SETSIZE; c++) {
+                if (!CPU_ISSET(c, &allowed)) continue;
+                if (seen == want) return c;
+                seen++;
+            }
+        }
+    }
+    return get_nth_online_cpu(n);   // fallback: previous behavior
+}
+
 __attribute__((always_inline)) static inline void pin_to_core(int core_id) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
@@ -656,7 +680,7 @@ int main(int argc, char** argv) {
             .write_queue = write_queue,
             .key_tables  = key_tables,
             .mode        = mode,
-            .core_id     = get_nth_online_cpu(i + 1),
+            .core_id     = nth_allowed_cpu(i + 1),
         };
         pid_t pid = fork();
         if (pid < 0) {
@@ -687,7 +711,7 @@ int main(int argc, char** argv) {
     }
     printf("\n");
 
-    pin_to_core(0);
+    pin_to_core(nth_allowed_cpu(0));
 
     printf("Initializing io_uring...\n");
     struct io_uring uring;
